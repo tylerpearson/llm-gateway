@@ -20,6 +20,7 @@ import (
 	"github.com/tylerpearson/llm-gateway/internal/auth"
 	"github.com/tylerpearson/llm-gateway/internal/cache"
 	"github.com/tylerpearson/llm-gateway/internal/config"
+	"github.com/tylerpearson/llm-gateway/internal/metrics"
 	"github.com/tylerpearson/llm-gateway/internal/pricing"
 	"github.com/tylerpearson/llm-gateway/internal/provider"
 	"github.com/tylerpearson/llm-gateway/internal/provider/anthropic"
@@ -56,6 +57,7 @@ func run(configPath string) error {
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 	)
+	proxyOpts := []proxy.Option{proxy.WithMetrics(metrics.New(reg))}
 
 	// Virtual key auth is enabled when a config store is configured. Without
 	// one the gateway runs unauthenticated, which is acceptable only for local
@@ -74,7 +76,6 @@ func run(configPath string) error {
 	}
 
 	// Cost attribution writes one row per request to ClickHouse when configured.
-	var proxyOpts []proxy.Option
 	if cfg.Storage.ClickHouseDSN != "" {
 		ch, err := clickhouse.Open(cfg.Storage.ClickHouseDSN)
 		if err != nil {

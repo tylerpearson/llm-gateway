@@ -45,11 +45,23 @@ func New(cfg config.Server, log *slog.Logger, reg *prometheus.Registry, routeFns
 		fn(r)
 	}
 
+	// WriteTimeout bounds the entire response, including the body, so a
+	// nonzero value would truncate long running SSE streams; the gateway
+	// keeps it at the configured value (commonly 0/unset, see
+	// config.defaultWriteTimeout) so streaming responses are not cut off.
+	// ReadHeaderTimeout guards against slowloris style connections that
+	// trickle in request headers without affecting an in-flight streaming
+	// response, since it only bounds the time to receive headers, not the
+	// time spent writing the response body. IdleTimeout reaps keep-alive
+	// connections that go idle between requests, freeing the underlying
+	// socket back to the pool.
 	s.httpServer = &http.Server{
-		Addr:         cfg.Addr,
-		Handler:      r,
-		ReadTimeout:  cfg.ReadTimeout,
-		WriteTimeout: cfg.WriteTimeout,
+		Addr:              cfg.Addr,
+		Handler:           r,
+		ReadTimeout:       cfg.ReadTimeout,
+		ReadHeaderTimeout: cfg.ReadHeaderTimeout,
+		WriteTimeout:      cfg.WriteTimeout,
+		IdleTimeout:       cfg.IdleTimeout,
 	}
 	return s
 }

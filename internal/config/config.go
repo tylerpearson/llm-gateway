@@ -51,12 +51,19 @@ type LimitSet struct {
 	MonthlyUSD     float64 `yaml:"monthly_usd"`
 }
 
-// Server holds HTTP listener settings.
+// Server holds HTTP listener settings. ReadHeaderTimeout bounds how long the
+// server waits to receive request headers, which closes off slowloris style
+// connection exhaustion on ingress. IdleTimeout bounds how long a keep-alive
+// connection may sit idle between requests. Neither field affects an
+// in-progress streaming response body, so they are safe defaults even though
+// WriteTimeout (if ever set) would truncate long SSE streams.
 type Server struct {
-	Addr            string        `yaml:"addr"`
-	ReadTimeout     time.Duration `yaml:"read_timeout"`
-	WriteTimeout    time.Duration `yaml:"write_timeout"`
-	ShutdownTimeout time.Duration `yaml:"shutdown_timeout"`
+	Addr              string        `yaml:"addr"`
+	ReadTimeout       time.Duration `yaml:"read_timeout"`
+	ReadHeaderTimeout time.Duration `yaml:"read_header_timeout"`
+	WriteTimeout      time.Duration `yaml:"write_timeout"`
+	IdleTimeout       time.Duration `yaml:"idle_timeout"`
+	ShutdownTimeout   time.Duration `yaml:"shutdown_timeout"`
 }
 
 // Logging controls structured logging output.
@@ -99,12 +106,14 @@ type Storage struct {
 
 // Default values applied when the file omits a field.
 const (
-	defaultAddr            = ":8080"
-	defaultReadTimeout     = 30 * time.Second
-	defaultWriteTimeout    = 0 // streaming responses must not be cut off
-	defaultShutdownTimeout = 15 * time.Second
-	defaultLogLevel        = "info"
-	defaultLogFormat       = "json"
+	defaultAddr              = ":8080"
+	defaultReadTimeout       = 30 * time.Second
+	defaultReadHeaderTimeout = 10 * time.Second
+	defaultWriteTimeout      = 0 // streaming responses must not be cut off
+	defaultIdleTimeout       = 120 * time.Second
+	defaultShutdownTimeout   = 15 * time.Second
+	defaultLogLevel          = "info"
+	defaultLogFormat         = "json"
 )
 
 // Load reads, parses, applies defaults and env overrides, and validates the
@@ -137,8 +146,14 @@ func (c *Config) applyDefaults() {
 	if c.Server.ReadTimeout == 0 {
 		c.Server.ReadTimeout = defaultReadTimeout
 	}
+	if c.Server.ReadHeaderTimeout == 0 {
+		c.Server.ReadHeaderTimeout = defaultReadHeaderTimeout
+	}
 	if c.Server.WriteTimeout == 0 {
 		c.Server.WriteTimeout = defaultWriteTimeout
+	}
+	if c.Server.IdleTimeout == 0 {
+		c.Server.IdleTimeout = defaultIdleTimeout
 	}
 	if c.Server.ShutdownTimeout == 0 {
 		c.Server.ShutdownTimeout = defaultShutdownTimeout

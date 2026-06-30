@@ -5,8 +5,18 @@
 server:
   addr: ":8080"
   read_timeout: 30s
+  # read_header_timeout bounds how long the server waits to receive request
+  # headers, which protects ingress against slowloris style connection
+  # exhaustion. It does not affect the time spent writing a streaming
+  # response body.
+  read_header_timeout: 10s
   # write_timeout is intentionally 0 so streaming responses are not cut off.
+  # If you ever set this to a nonzero value, remember it bounds the entire
+  # response, including long lived SSE streams, and will truncate them.
   write_timeout: 0s
+  # idle_timeout bounds how long a keep-alive connection may sit idle
+  # between requests before it is closed.
+  idle_timeout: 120s
   shutdown_timeout: 15s
 
 logging:

@@ -26,6 +26,8 @@ func TestLoadValid(t *testing.T) {
 server:
   addr: ":9090"
   read_timeout: 5s
+  read_header_timeout: 3s
+  idle_timeout: 60s
 logging:
   level: debug
   format: text
@@ -54,6 +56,12 @@ storage:
 	if cfg.Server.ReadTimeout != 5*time.Second {
 		t.Errorf("read_timeout = %v, want 5s", cfg.Server.ReadTimeout)
 	}
+	if cfg.Server.ReadHeaderTimeout != 3*time.Second {
+		t.Errorf("read_header_timeout = %v, want 3s", cfg.Server.ReadHeaderTimeout)
+	}
+	if cfg.Server.IdleTimeout != 60*time.Second {
+		t.Errorf("idle_timeout = %v, want 60s", cfg.Server.IdleTimeout)
+	}
 	if got := cfg.Providers["anthropic"].APIKey; got != "secret-key" {
 		t.Errorf("api key = %q, want secret-key (env override)", got)
 	}
@@ -74,6 +82,12 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if cfg.Server.ReadTimeout != defaultReadTimeout {
 		t.Errorf("read_timeout = %v, want default %v", cfg.Server.ReadTimeout, defaultReadTimeout)
+	}
+	if cfg.Server.ReadHeaderTimeout != defaultReadHeaderTimeout {
+		t.Errorf("read_header_timeout = %v, want default %v", cfg.Server.ReadHeaderTimeout, defaultReadHeaderTimeout)
+	}
+	if cfg.Server.IdleTimeout != defaultIdleTimeout {
+		t.Errorf("idle_timeout = %v, want default %v", cfg.Server.IdleTimeout, defaultIdleTimeout)
 	}
 	if cfg.Server.ShutdownTimeout != defaultShutdownTimeout {
 		t.Errorf("shutdown_timeout = %v, want default %v", cfg.Server.ShutdownTimeout, defaultShutdownTimeout)

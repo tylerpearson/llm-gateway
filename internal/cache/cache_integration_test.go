@@ -30,7 +30,7 @@ func TestCacheRoundTrip(t *testing.T) {
 
 	ctx := context.Background()
 	nonce := fmt.Sprintf(`{"n":%d}`, time.Now().UnixNano())
-	key := Key(provider.ShapeAnthropic, "glm", "m", []byte(nonce))
+	key := Key("team-a", provider.ShapeAnthropic, "glm", "m", []byte(nonce))
 
 	if _, ok := c.Get(ctx, key); ok {
 		t.Fatal("expected miss for a fresh key")
@@ -49,7 +49,7 @@ func TestCacheRoundTrip(t *testing.T) {
 	}
 
 	// Oversized bodies are not cached (maxBytes is 32 above).
-	bigKey := Key(provider.ShapeAnthropic, "glm", "big", []byte(nonce))
+	bigKey := Key("team-a", provider.ShapeAnthropic, "glm", "big", []byte(nonce))
 	c.Set(ctx, bigKey, &Entry{Status: 200, Body: make([]byte, 1024)})
 	if _, ok := c.Get(ctx, bigKey); ok {
 		t.Error("oversized entry should not be cached")

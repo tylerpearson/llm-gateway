@@ -35,6 +35,24 @@ This file covers how to parallelize and land larger changes.
   applies. End commit messages with the Co-Authored-By trailer. End PR bodies
   with the Claude Code generated-with line.
 
+## Test thoroughly
+
+- Every change ships with thorough tests. New behavior gets table-driven tests
+  using `httptest` for HTTP layers and a mock provider for proxy logic (see
+  CLAUDE.md). A change is not done until its tests are.
+- Cover the edges, not just the happy path: error returns, context cancellation,
+  upstream non-2xx status, empty and malformed input, and boundary values.
+- Keep the command binaries (`cmd/gateway`, `cmd/gatewayctl`) under test. Pure
+  wiring helpers and argument-validation paths are unit-testable without a
+  database; exercise them rather than leaving the binaries at zero coverage.
+- Logic that needs MySQL, ClickHouse, or Redis goes behind the `integration`
+  build tag and must skip cleanly when its DSN is unset. Do not let an
+  integration dependency leave a code path with no test at all: cover the
+  in-process logic with a unit test and the backend round trip with an
+  integration test.
+- Before opening a PR, confirm coverage did not regress for the packages you
+  touched (`go test ./... -cover`).
+
 ## Writing rules (same as CLAUDE.md, repeated here for agents)
 
 - No em dashes (U+2014) anywhere in code, comments, commits, PRs, or docs. Verify

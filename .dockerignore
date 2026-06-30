@@ -1,0 +1,30 @@
+# Keep the Docker build context small. Only Go source, module files,
+# and config examples are needed.
+
+# Version control
+.git
+.gitignore
+
+# Documentation
+*.md
+PLAN.md
+
+# Local environment / secrets (never ship these)
+.env
+.env.*
+*.local
+
+# Go build artifacts
+/bin/
+/dist/
+*.test
+*.out
+coverage.*
+
+# Deploy / infrastructure files (not needed inside the image)
+deploy/
+
+# Editor and OS noise
+.DS_Store
+.idea/
+.vscode/

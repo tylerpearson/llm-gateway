@@ -1,0 +1,35 @@
+# Grafana datasource provisioning for the llm-gateway local dev stack.
+#
+# This file is loaded automatically on Grafana startup. Changes take effect
+# after restarting the grafana container.
+
+apiVersion: 1
+
+datasources:
+  # Primary datasource: Prometheus.
+  # Provides all Go runtime, process, and (later) business metrics.
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      timeInterval: "15s"
+
+  # NOTE: ClickHouse datasource for FinOps spend dashboards.
+  # This datasource will be added in the observability phase once the
+  # ClickHouse plugin (grafana-clickhouse-datasource) is provisioned and
+  # the spend schema is in place. Example config (uncomment and fill in):
+  #
+  # - name: ClickHouse
+  #   type: grafana-clickhouse-datasource
+  #   access: proxy
+  #   url: http://clickhouse:8123
+  #   isDefault: false
+  #   editable: false
+  #   jsonData:
+  #     host: clickhouse
+  #     port: 9000
+  #     username: default
+  #     defaultDatabase: default

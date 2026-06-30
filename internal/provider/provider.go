@@ -13,6 +13,19 @@ import (
 	"net/http"
 )
 
+// Shape is the wire format a client speaks or a provider expects. Same-shape
+// routing forwards the body unchanged; cross-shape routing runs the translation
+// module.
+type Shape string
+
+const (
+	// ShapeAnthropic is the Anthropic Messages wire format (/v1/messages).
+	ShapeAnthropic Shape = "anthropic"
+	// ShapeOpenAI is the OpenAI Chat Completions wire format
+	// (/v1/chat/completions), also spoken by GLM.
+	ShapeOpenAI Shape = "openai"
+)
+
 // Request is the gateway's normalized view of an inbound completion request.
 // Raw carries the original client JSON body so a same-shape provider can
 // forward it verbatim; the typed fields let the router and adapters make
@@ -66,6 +79,8 @@ type UsageScanner interface {
 type Provider interface {
 	// Name is the configured provider name (the key under providers: in config).
 	Name() string
+	// Shape is the wire format this provider expects.
+	Shape() Shape
 	// Complete forwards req to the upstream and returns the response. The proxy
 	// is responsible for relaying Body to the client and capturing usage.
 	Complete(ctx context.Context, req *Request) (*Response, error)

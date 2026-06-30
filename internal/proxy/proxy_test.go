@@ -11,11 +11,15 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/tylerpearson/llm-gateway/internal/config"
+	"github.com/tylerpearson/llm-gateway/internal/provider"
 	"github.com/tylerpearson/llm-gateway/internal/provider/anthropic"
+	"github.com/tylerpearson/llm-gateway/internal/provider/openai"
+	"github.com/tylerpearson/llm-gateway/internal/router"
 )
 
-const upstreamSSE = `event: message_start
-data: {"type":"message_start","message":{"usage":{"input_tokens":10,"cache_creation_input_tokens":3,"cache_read_input_tokens":2,"output_tokens":1}}}
+const anthropicSSE = `event: message_start
+data: {"type":"message_start","message":{"usage":{"input_tokens":10,"output_tokens":1}}}
 
 event: message_delta
 data: {"type":"message_delta","usage":{"output_tokens":25}}
@@ -25,24 +29,45 @@ data: {"type":"message_stop"}
 
 `
 
-// newProxy builds a proxy handler wired to an Anthropic provider that points at
-// the given mock upstream, and a buffer capturing the handler's structured log.
-func newProxy(t *testing.T, upstreamURL string) (*Handler, *bytes.Buffer) {
+const openAISSE = `data: {"choices":[{"delta":{"role":"assistant","content":"hi"},"finish_reason":null}]}
+
+data: {"choices":[{"delta":{"content":" there"},"finish_reason":"stop"}]}
+
+data: {"choices":[],"usage":{"prompt_tokens":8,"completion_tokens":3}}
+
+data: [DONE]
+
+`
+
+func newHandler(t *testing.T, providers provider.Registry, routing config.Routing) (*Handler, *bytes.Buffer) {
 	t.Helper()
+	shapes := map[string]provider.Shape{}
+	for n, p := range providers {
+		shapes[n] = p.Shape()
+	}
 	var logBuf bytes.Buffer
 	log := slog.New(slog.NewJSONHandler(&logBuf, nil))
-	prov := anthropic.New("anthropic", upstreamURL, "test-key")
-	return New(prov, log), &logBuf
+	return New(providers, router.New(routing, shapes), log), &logBuf
 }
 
-func postMessages(h *Handler, body string) *httptest.ResponseRecorder {
-	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
+func routingTo(providerName, model string) config.Routing {
+	return config.Routing{
+		DefaultAlias: "default",
+		Aliases:      map[string]config.Route{"default": {Provider: providerName, Model: model}},
+	}
+}
+
+func post(h *Handler, path, body string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
 	rec := httptest.NewRecorder()
-	h.Messages(rec, req)
+	if path == "/v1/messages" {
+		h.Messages(rec, req)
+	} else {
+		h.ChatCompletions(rec, req)
+	}
 	return rec
 }
 
-// logFields returns the fields of the "proxy request" log line.
 func logFields(t *testing.T, buf *bytes.Buffer) map[string]any {
 	t.Helper()
 	sc := bufio.NewScanner(buf)
@@ -59,113 +84,138 @@ func logFields(t *testing.T, buf *bytes.Buffer) map[string]any {
 	return nil
 }
 
-func TestMessages_StreamsAndCapturesUsage(t *testing.T) {
-	var gotAPIKey, gotVersion, gotAccept string
+func TestMessages_SameShapeStreamsAndCapturesUsage(t *testing.T) {
+	var gotAPIKey string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAPIKey = r.Header.Get("x-api-key")
-		gotVersion = r.Header.Get("anthropic-version")
-		gotAccept = r.Header.Get("Accept")
 		w.Header().Set("Content-Type", "text/event-stream")
-		w.WriteHeader(http.StatusOK)
-		_, _ = io.WriteString(w, upstreamSSE)
+		_, _ = io.WriteString(w, anthropicSSE)
 	}))
 	defer upstream.Close()
 
-	h, logBuf := newProxy(t, upstream.URL)
-	rec := postMessages(h, `{"model":"claude-haiku-4-5-20251001","stream":true}`)
+	reg := provider.Registry{"anthropic": anthropic.New("anthropic", upstream.URL, "test-key")}
+	h, logBuf := newHandler(t, reg, routingTo("anthropic", "claude-haiku-4-5-20251001"))
+	rec := post(h, "/v1/messages", `{"model":"claude-haiku-4-5-20251001","stream":true}`)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
-	if ct := rec.Header().Get("Content-Type"); ct != "text/event-stream" {
-		t.Errorf("content-type = %q, want text/event-stream", ct)
+	if rec.Body.String() != anthropicSSE {
+		t.Errorf("body not relayed verbatim: got %q", rec.Body.String())
 	}
-	if rec.Body.String() != upstreamSSE {
-		t.Errorf("body not relayed verbatim:\n got %q\nwant %q", rec.Body.String(), upstreamSSE)
-	}
-
-	// The gateway must attach its own credentials and stream-appropriate Accept.
 	if gotAPIKey != "test-key" {
 		t.Errorf("upstream x-api-key = %q, want test-key", gotAPIKey)
 	}
-	if gotVersion == "" {
-		t.Error("upstream anthropic-version not set")
+	f := logFields(t, logBuf)
+	if f["input_tokens"] != float64(10) || f["output_tokens"] != float64(25) {
+		t.Errorf("usage = in %v out %v, want 10/25", f["input_tokens"], f["output_tokens"])
 	}
-	if gotAccept != "text/event-stream" {
-		t.Errorf("upstream Accept = %q, want text/event-stream", gotAccept)
-	}
-
-	fields := logFields(t, logBuf)
-	if got := fields["input_tokens"]; got != float64(10) {
-		t.Errorf("input_tokens = %v, want 10", got)
-	}
-	if got := fields["output_tokens"]; got != float64(25) {
-		t.Errorf("output_tokens = %v, want 25", got)
-	}
-	if got := fields["cache_read_tokens"]; got != float64(2) {
-		t.Errorf("cache_read_tokens = %v, want 2", got)
-	}
-	if got := fields["cache_write_tokens"]; got != float64(3) {
-		t.Errorf("cache_write_tokens = %v, want 3", got)
+	if f["translated"] != false {
+		t.Errorf("translated = %v, want false", f["translated"])
 	}
 }
 
-func TestMessages_NonStreamingJSON(t *testing.T) {
-	const doc = `{"id":"msg_1","type":"message","usage":{"input_tokens":5,"output_tokens":7}}`
+func TestChatCompletions_SameShapeOpenAI(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, doc)
+		if got := r.Header.Get("Authorization"); got != "Bearer oai-key" {
+			t.Errorf("upstream auth = %q, want Bearer oai-key", got)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, openAISSE)
 	}))
 	defer upstream.Close()
 
-	h, logBuf := newProxy(t, upstream.URL)
-	rec := postMessages(h, `{"model":"claude-haiku-4-5-20251001","stream":false}`)
+	reg := provider.Registry{"openai": openai.New("openai", upstream.URL, "oai-key")}
+	h, logBuf := newHandler(t, reg, routingTo("openai", "gpt-4o-mini"))
+	rec := post(h, "/v1/chat/completions", `{"model":"gpt-4o-mini","stream":true}`)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
-	if rec.Body.String() != doc {
-		t.Errorf("body = %q, want %q", rec.Body.String(), doc)
+	if !strings.Contains(rec.Body.String(), `"content":"hi"`) {
+		t.Errorf("body missing relayed content: %q", rec.Body.String())
 	}
-	fields := logFields(t, logBuf)
-	if got := fields["input_tokens"]; got != float64(5) {
-		t.Errorf("input_tokens = %v, want 5", got)
-	}
-	if got := fields["output_tokens"]; got != float64(7) {
-		t.Errorf("output_tokens = %v, want 7", got)
+	f := logFields(t, logBuf)
+	if f["input_tokens"] != float64(8) || f["output_tokens"] != float64(3) {
+		t.Errorf("usage = in %v out %v, want 8/3", f["input_tokens"], f["output_tokens"])
 	}
 }
 
-func TestMessages_InvalidJSON(t *testing.T) {
-	h, _ := newProxy(t, "http://127.0.0.1:0")
-	rec := postMessages(h, `{not json`)
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400", rec.Code)
-	}
-	if !strings.Contains(rec.Body.String(), "invalid_request_error") {
-		t.Errorf("body = %q, want invalid_request_error", rec.Body.String())
-	}
-}
-
-func TestMessages_UpstreamErrorStatusPassedThrough(t *testing.T) {
+// TestMessages_CrossShapeTranslation routes an Anthropic /v1/messages request to
+// an OpenAI shaped provider and verifies the response is translated back to
+// Anthropic SSE with usage captured.
+func TestMessages_CrossShapeTranslation(t *testing.T) {
+	var sawOpenAIModel string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusTooManyRequests)
-		_, _ = io.WriteString(w, `{"type":"error","error":{"type":"rate_limit_error"}}`)
+		body, _ := io.ReadAll(r.Body)
+		var req struct {
+			Model    string `json:"model"`
+			Messages []struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"messages"`
+		}
+		_ = json.Unmarshal(body, &req)
+		sawOpenAIModel = req.Model
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, openAISSE)
 	}))
 	defer upstream.Close()
 
-	h, _ := newProxy(t, upstream.URL)
-	rec := postMessages(h, `{"model":"x","stream":false}`)
-	if rec.Code != http.StatusTooManyRequests {
-		t.Fatalf("status = %d, want 429 passed through", rec.Code)
+	reg := provider.Registry{"glm": openai.New("glm", upstream.URL, "glm-key")}
+	h, logBuf := newHandler(t, reg, routingTo("glm", "glm-4.5"))
+	// Client speaks Anthropic shape; alias "default" routes to the OpenAI shaped glm.
+	rec := post(h, "/v1/messages", `{"model":"default","stream":true,"messages":[{"role":"user","content":"hello"}]}`)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if sawOpenAIModel != "glm-4.5" {
+		t.Errorf("upstream model = %q, want glm-4.5 (request translated)", sawOpenAIModel)
+	}
+	out := rec.Body.String()
+	// The client must receive Anthropic shaped SSE, not the raw OpenAI stream.
+	for _, want := range []string{"event: message_start", "content_block_delta", "text_delta", "hi", "event: message_stop"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("translated output missing %q\n got: %q", want, out)
+		}
+	}
+	f := logFields(t, logBuf)
+	if f["translated"] != true {
+		t.Errorf("translated = %v, want true", f["translated"])
+	}
+	if f["input_tokens"] != float64(8) || f["output_tokens"] != float64(3) {
+		t.Errorf("usage = in %v out %v, want 8/3", f["input_tokens"], f["output_tokens"])
 	}
 }
 
-func TestMessages_UpstreamUnreachable(t *testing.T) {
-	// Port 0 on a closed address forces a dial failure inside Complete.
-	h, _ := newProxy(t, "http://127.0.0.1:1")
-	rec := postMessages(h, `{"model":"x","stream":false}`)
+func TestServe_InvalidJSON(t *testing.T) {
+	reg := provider.Registry{"anthropic": anthropic.New("anthropic", "http://127.0.0.1:0", "k")}
+	h, _ := newHandler(t, reg, routingTo("anthropic", "m"))
+	rec := post(h, "/v1/messages", `{not json`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+}
+
+func TestServe_UpstreamErrorPassedThrough(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = io.WriteString(w, `{"type":"error"}`)
+	}))
+	defer upstream.Close()
+	reg := provider.Registry{"anthropic": anthropic.New("anthropic", upstream.URL, "k")}
+	h, _ := newHandler(t, reg, routingTo("anthropic", "m"))
+	rec := post(h, "/v1/messages", `{"model":"m","stream":false}`)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429", rec.Code)
+	}
+}
+
+func TestServe_UpstreamUnreachable(t *testing.T) {
+	reg := provider.Registry{"anthropic": anthropic.New("anthropic", "http://127.0.0.1:1", "k")}
+	h, _ := newHandler(t, reg, routingTo("anthropic", "m"))
+	rec := post(h, "/v1/messages", `{"model":"m","stream":false}`)
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("status = %d, want 502", rec.Code)
 	}

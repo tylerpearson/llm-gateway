@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/prometheus/client_golang/prometheus"
@@ -79,8 +80,8 @@ func run(configPath string) error {
 			return fmt.Errorf("open config store: %w", err)
 		}
 		defer func() { _ = st.Close() }()
-		authMW = auth.New(st, log, 0).Middleware
-		log.Info("virtual key auth enabled")
+		authMW = auth.New(st, log, cfg.Security.AuthCacheTTL).Middleware
+		log.Info("virtual key auth enabled", slog.Duration("key_cache_ttl", authCacheTTL(cfg.Security.AuthCacheTTL)))
 	} else {
 		log.Warn("AUTH DISABLED: MYSQL_DSN not configured, /v1/messages is unauthenticated (development only)")
 	}
@@ -188,6 +189,16 @@ func buildProviders(pcs map[string]config.Provider, log *slog.Logger) provider.R
 		}
 	}
 	return reg
+}
+
+// authCacheTTL resolves the configured key-cache TTL to the effective value,
+// applying the auth package default when unset, so startup logs the real
+// revocation window rather than a placeholder zero.
+func authCacheTTL(ttl time.Duration) time.Duration {
+	if ttl == 0 {
+		return auth.DefaultCacheTTL
+	}
+	return ttl
 }
 
 // limitSettings maps config limits to the ratelimit package settings.

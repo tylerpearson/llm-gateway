@@ -27,9 +27,12 @@ type Config struct {
 // Security holds hardening toggles. RedactPrompts (default true) keeps prompt
 // and response content out of logs and analytics; the gateway never persists
 // request or response bodies, and prompt previews are logged only when this is
-// explicitly disabled.
+// explicitly disabled. AuthCacheTTL bounds how long a disabled key keeps
+// authenticating after revocation: it is the lifetime of a cached key lookup,
+// and so the revocation SLA. Zero uses the auth package default.
 type Security struct {
-	RedactPrompts *bool `yaml:"redact_prompts"`
+	RedactPrompts *bool         `yaml:"redact_prompts"`
+	AuthCacheTTL  time.Duration `yaml:"auth_cache_ttl"`
 }
 
 // Limits configures per key and per team budgets and rate limits. A limit of 0

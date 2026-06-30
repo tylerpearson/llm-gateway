@@ -1,0 +1,2 @@
+DROP TABLE IF EXISTS virtual_keys;
+DROP TABLE IF EXISTS teams;

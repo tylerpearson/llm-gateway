@@ -183,19 +183,11 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, clientShape prov
 		return
 	}
 
-	// Cache lookup on the exact request. A hit replays the stored response
-	// without touching the upstream.
-	var cacheKey string
-	if h.cache != nil {
-		cacheKey = cache.Key(clientShape, target.Provider, target.Model, body)
-		if entry, ok := h.cache.Get(r.Context(), cacheKey); ok {
-			h.serveCacheHit(w, r, reqID, meta.Model, meta.Stream, target, entry, start)
-			return
-		}
-	}
-
-	// Budget and rate limit enforcement. A breach is reported on x-llm-limit;
-	// in hard mode it rejects the request with 429.
+	// Budget and rate limit enforcement. This runs before the cache lookup so a
+	// cache hit is still subject to per-request rate limits and hard-mode
+	// budget rejection; otherwise a cached response could be replayed for free
+	// past a key or team's limit. A breach is reported on x-llm-limit; in hard
+	// mode it rejects the request with 429.
 	if h.limiter != nil && (ident.KeyID != "" || ident.TeamID != "") {
 		d := h.limiter.Check(r.Context(), ident)
 		if len(d.Exceeded) > 0 {
@@ -214,6 +206,21 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, clientShape prov
 				h.writeError(w, http.StatusTooManyRequests, "rate_limit_error", "budget or rate limit exceeded: "+strings.Join(d.Exceeded, ", "))
 				return
 			}
+		}
+	}
+
+	// Cache lookup on the exact request, scoped to the caller's tenant. A hit
+	// replays the stored response without touching the upstream.
+	var cacheKey string
+	if h.cache != nil {
+		tenant := ident.TeamID
+		if tenant == "" {
+			tenant = ident.KeyID
+		}
+		cacheKey = cache.Key(tenant, clientShape, target.Provider, target.Model, body)
+		if entry, ok := h.cache.Get(r.Context(), cacheKey); ok {
+			h.serveCacheHit(w, r, reqID, meta.Model, meta.Stream, target, entry, start)
+			return
 		}
 	}
 
@@ -264,9 +271,16 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, clientShape prov
 	}
 	usage, written, relayErr := h.relayResponse(w, resp, clientShape, target, meta.Stream, capture)
 
+	// Post-response bookkeeping uses a context derived from the request's but
+	// with cancellation stripped. r.Context() is canceled as soon as the
+	// client disconnects, which happens routinely for streamed responses right
+	// after the last byte is relayed; using it here would silently drop cache
+	// writes and budget counters for exactly the requests that just completed.
+	bgCtx := context.WithoutCancel(r.Context())
+
 	// Store a successful, fully captured response for future identical requests.
 	if h.cache != nil && capture != nil && !capture.truncated && resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		h.cache.Set(r.Context(), cacheKey, &cache.Entry{
+		h.cache.Set(bgCtx, cacheKey, &cache.Entry{
 			Status:      resp.StatusCode,
 			ContentType: contentType(meta.Stream),
 			Body:        capture.Bytes(),
@@ -278,7 +292,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, clientShape prov
 	// requests see updated usage.
 	if h.limiter != nil && (ident.KeyID != "" || ident.TeamID != "") && resp.StatusCode < 400 {
 		cost, _ := h.pricing.Cost(target.Model, usage.InputTokens, usage.OutputTokens, usage.CacheReadTokens, usage.CacheWriteTokens)
-		h.limiter.RecordUsage(r.Context(), ident, usage.InputTokens+usage.OutputTokens, cost)
+		h.limiter.RecordUsage(bgCtx, ident, usage.InputTokens+usage.OutputTokens, cost)
 	}
 
 	h.log.Info("proxy request",

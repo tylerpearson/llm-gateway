@@ -1,8 +1,10 @@
 // Package cache is the Redis backed exact-match response cache. A request is
-// keyed by a hash of its client shape, resolved provider and model, and the
-// canonicalized request body. A cache hit replays the stored client-facing
+// keyed by a hash of its tenant, client shape, resolved provider and model,
+// and the canonicalized request body. The cache is scoped per tenant (team,
+// falling back to key) so two different tenants issuing an identical request
+// never share a cached entry. A cache hit replays the stored client-facing
 // bytes (including streamed SSE) without calling the upstream, so an identical
-// request costs nothing.
+// request from the same tenant costs nothing.
 package cache
 
 import (
@@ -99,11 +101,16 @@ func (c *Cache) Set(ctx context.Context, key string, e *Entry) {
 	}
 }
 
-// Key derives the cache key from the client shape, resolved provider and model,
-// and the canonicalized request body. Canonicalization makes the key stable
-// across insignificant whitespace and key ordering.
-func Key(shape provider.Shape, providerName, model string, body []byte) string {
+// Key derives the cache key from the tenant, client shape, resolved provider
+// and model, and the canonicalized request body. tenant scopes the key to a
+// tenant boundary (team, falling back to key, or "" for unauthenticated or
+// dev traffic) so two tenants issuing an identical request never collide.
+// Canonicalization makes the key stable across insignificant whitespace and
+// key ordering.
+func Key(tenant string, shape provider.Shape, providerName, model string, body []byte) string {
 	h := sha256.New()
+	h.Write([]byte(tenant))
+	h.Write([]byte{0})
 	h.Write([]byte(shape))
 	h.Write([]byte{0})
 	h.Write([]byte(providerName))

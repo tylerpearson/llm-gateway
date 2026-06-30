@@ -1,8 +1,8 @@
 # llm-gateway
 
 > **Work in progress / personal test project.** This is a learning and portfolio
-> build under active construction, not a finished or supported product. Only the
-> P0 scaffold currently exists (see Status below). Do not deploy it as is. The
+> build under active construction, not a finished or supported product. Phases
+> P0 through P3 currently exist (see Status below). Do not deploy it as is. The
 > public repository exists so CI can run on free Actions minutes.
 
 A production-grade multi-provider LLM gateway in Go. Every LLM call from Claude Code and other clients flows through a single proxy so cost control, request routing, response caching, and observability happen in one place rather than in each client. The gateway supports Anthropic, OpenAI, and GLM out of the box, attributes spend to teams and virtual keys, and feeds Grafana dashboards backed by Prometheus and ClickHouse.
@@ -28,21 +28,20 @@ The middleware chain handles: request ID and recovery, virtual key auth (MySQL-b
 
 **Under active construction.** The project is built in phased increments where each phase leaves a working, testable gateway.
 
-**P0 (scaffold) is what currently exists:**
+**What currently exists (P0 through P3):**
 
 - YAML config loader with env-var secret injection
 - HTTP server (`/healthz`, `/readyz`, `/metrics`) with graceful shutdown
 - Docker Compose dev stack (gateway, MySQL, ClickHouse, Redis, Prometheus, Grafana)
-- Makefile with standard targets
-- GitHub Actions CI (build, test, lint, vuln)
+- Makefile, GitHub Actions CI (build, race tests, lint, vuln, plus a MySQL and ClickHouse integration job)
+- **P1**: streaming `POST /v1/messages` pass-through to Anthropic with token usage capture
+- **P2**: virtual key auth backed by MySQL (sha256-hashed keys), `gatewayctl` for migrations and seeding teams and keys
+- **P3**: per-request cost attribution written asynchronously to ClickHouse `request_logs`
 
 **Upcoming phases:**
 
 | Phase | Description |
 |-------|-------------|
-| P1 | Core streaming proxy: `/v1/messages` pass-through to Anthropic, provider interface, mock-provider tests |
-| P2 | Virtual keys and auth: MySQL store, migrations, auth middleware, `gatewayctl` seed |
-| P3 | Cost attribution: pricing table, cost calculation, ClickHouse request logging |
 | P4 | Routing and providers: model aliases/tiers, OpenAI and GLM adapters, `/v1/chat/completions`, cross-shape translation |
 | P5 | Response caching: Redis exact-match cache with streaming replay |
 | P6 | Budgets and rate limits: Redis counters, soft and hard enforcement modes |
@@ -71,14 +70,22 @@ make up
 make run
 ```
 
-**Pointing Claude Code at the gateway** (available once P1 is complete):
+**Seed a team and virtual key** (requires `MYSQL_DSN`):
+
+```bash
+gatewayctl migrate                                   # apply MySQL (and ClickHouse) schema
+gatewayctl team create acme                          # prints the team id
+gatewayctl key create --team <team-id> --name dev    # prints the key once, stores only its hash
+```
+
+**Pointing Claude Code at the gateway:**
 
 ```bash
 export ANTHROPIC_BASE_URL=http://localhost:8080
-export ANTHROPIC_API_KEY=<virtual-key>   # virtual keys are issued in P2
+export ANTHROPIC_API_KEY=<virtual-key>   # the llmgw_... key from gatewayctl key create
 ```
 
-Note: virtual key issuance via `gatewayctl` arrives in P2. In P1, pass any non-empty value.
+The gateway holds the real provider key; clients authenticate with their virtual key. When `MYSQL_DSN` is not set the gateway runs unauthenticated and logs a prominent warning (local development only).
 
 ## Configuration
 
@@ -133,13 +140,13 @@ Operational endpoints available today:
 |--------|------|-------------|
 | GET | `/healthz` | Process liveness: returns `{"status":"ok"}` while the process is running |
 | GET | `/readyz` | Readiness: returns 503 until startup wiring completes, then `{"status":"ready"}` |
-| GET | `/metrics` | Prometheus metrics (Go runtime and process collectors in P0) |
+| GET | `/metrics` | Prometheus metrics (Go runtime and process collectors) |
+| POST | `/v1/messages` | Anthropic Messages proxy: authenticated (virtual key), streams the response, captures usage, and logs cost to ClickHouse |
 
-Proxy endpoints arrive in later phases:
+Proxy endpoints arriving in later phases:
 
 | Method | Path | Phase |
 |--------|------|-------|
-| POST | `/v1/messages` | P1 |
 | POST | `/v1/chat/completions` | P4 |
 
 ## Development

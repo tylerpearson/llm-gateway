@@ -145,6 +145,60 @@ func (s *Store) ListKeys(ctx context.Context, teamID string) ([]store.VirtualKey
 	return keys, rows.Err()
 }
 
+// DisableKey marks a key disabled.
+func (s *Store) DisableKey(ctx context.Context, keyID string) error {
+	res, err := s.db.ExecContext(ctx, "UPDATE virtual_keys SET disabled = 1 WHERE id = ?", keyID)
+	if err != nil {
+		return fmt.Errorf("disable key: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err == nil && n == 0 {
+		return store.ErrNotFound
+	}
+	return nil
+}
+
+// RecordAudit appends an audit entry.
+func (s *Store) RecordAudit(ctx context.Context, actor, action, target, details string) error {
+	_, err := s.db.ExecContext(ctx,
+		"INSERT INTO audit_log (id, actor, action, target, details, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+		store.NewID(), actor, action, target, nullable(details), time.Now().UTC())
+	if err != nil {
+		return fmt.Errorf("record audit: %w", err)
+	}
+	return nil
+}
+
+// ListAudit returns the most recent audit entries, newest first.
+func (s *Store) ListAudit(ctx context.Context, limit int) ([]store.AuditEntry, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := s.db.QueryContext(ctx,
+		"SELECT id, actor, action, target, COALESCE(details, ''), created_at FROM audit_log ORDER BY created_at DESC LIMIT ?", limit)
+	if err != nil {
+		return nil, fmt.Errorf("list audit: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var entries []store.AuditEntry
+	for rows.Next() {
+		var e store.AuditEntry
+		if err := rows.Scan(&e.ID, &e.Actor, &e.Action, &e.Target, &e.Details, &e.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan audit: %w", err)
+		}
+		entries = append(entries, e)
+	}
+	return entries, rows.Err()
+}
+
+func nullable(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
 // ensureParam appends key=value to a go-sql-driver DSN query string if the key
 // is not already present.
 func ensureParam(dsn, key, value string) string {

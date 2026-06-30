@@ -35,6 +35,16 @@ type VirtualKey struct {
 	CreatedAt    time.Time
 }
 
+// AuditEntry is one recorded administrative action.
+type AuditEntry struct {
+	ID        string
+	Actor     string
+	Action    string
+	Target    string
+	Details   string
+	CreatedAt time.Time
+}
+
 // Store is the config-plane persistence interface.
 type Store interface {
 	// CreateTeam inserts a team and returns it.
@@ -48,6 +58,12 @@ type Store interface {
 	LookupKeyByHash(ctx context.Context, keyHash string) (*VirtualKey, error)
 	// ListKeys returns the keys for a team (hashes included, never plaintext).
 	ListKeys(ctx context.Context, teamID string) ([]VirtualKey, error)
+	// DisableKey marks a key disabled so it can no longer authenticate.
+	DisableKey(ctx context.Context, keyID string) error
+	// RecordAudit appends an audit log entry for an administrative change.
+	RecordAudit(ctx context.Context, actor, action, target, details string) error
+	// ListAudit returns the most recent audit entries, newest first.
+	ListAudit(ctx context.Context, limit int) ([]AuditEntry, error)
 	// Close releases the underlying connection pool.
 	Close() error
 }

@@ -28,25 +28,25 @@ The middleware chain handles: request ID and recovery, virtual key auth (MySQL-b
 
 **Under active construction.** The project is built in phased increments where each phase leaves a working, testable gateway.
 
-**What currently exists (P0 through P3):**
+**What currently exists (P0 through P8):**
 
 - YAML config loader with env-var secret injection
 - HTTP server (`/healthz`, `/readyz`, `/metrics`) with graceful shutdown
 - Docker Compose dev stack (gateway, MySQL, ClickHouse, Redis, Prometheus, Grafana)
-- Makefile, GitHub Actions CI (build, race tests, lint, vuln, plus a MySQL and ClickHouse integration job)
+- Makefile, GitHub Actions CI (build, race tests, lint, vuln, plus a MySQL, ClickHouse, and Redis integration job)
 - **P1**: streaming `POST /v1/messages` pass-through to Anthropic with token usage capture
 - **P2**: virtual key auth backed by MySQL (sha256-hashed keys), `gatewayctl` for migrations and seeding teams and keys
 - **P3**: per-request cost attribution written asynchronously to ClickHouse `request_logs`
+- **P4**: alias/tier routing, OpenAI and GLM adapters, `POST /v1/chat/completions`, and the bounded cross-shape translation module
+- **P5**: Redis exact-match response cache with streaming replay
+- **P6**: per-key and per-team budgets and rate limits (requests/min, tokens/min, monthly USD) with soft and hard modes
+- **P7**: Prometheus metrics and four provisioned Grafana dashboards (spend, FinOps, latency, cache)
+- **P8**: prompt redaction (on by default), audit logging of admin changes, and a Helm chart in `charts/llm-gateway`
 
 **Upcoming phases:**
 
 | Phase | Description |
 |-------|-------------|
-| P4 | Routing and providers: model aliases/tiers, OpenAI and GLM adapters, `/v1/chat/completions`, cross-shape translation |
-| P5 | Response caching: Redis exact-match cache with streaming replay |
-| P6 | Budgets and rate limits: Redis counters, soft and hard enforcement modes |
-| P7 | Observability: Prometheus metrics, provisioned Grafana dashboards |
-| P8 | Hardening: prompt/response redaction, admin API, audit log, Helm chart |
 | P9 | v2 seams: eval `MirrorHook` interface and ClickHouse eval schema (no-op placeholders) |
 
 ## Quickstart (local dev)
@@ -140,14 +140,15 @@ Operational endpoints available today:
 |--------|------|-------------|
 | GET | `/healthz` | Process liveness: returns `{"status":"ok"}` while the process is running |
 | GET | `/readyz` | Readiness: returns 503 until startup wiring completes, then `{"status":"ready"}` |
-| GET | `/metrics` | Prometheus metrics (Go runtime and process collectors) |
-| POST | `/v1/messages` | Anthropic Messages proxy: authenticated (virtual key), streams the response, captures usage, and logs cost to ClickHouse |
+| GET | `/metrics` | Prometheus metrics (Go runtime, process, and `llmgw_*` request collectors) |
+| POST | `/v1/messages` | Anthropic Messages proxy: authenticated, routed, cached, rate-limited, streamed, with usage and cost capture |
+| POST | `/v1/chat/completions` | OpenAI Chat Completions proxy: same pipeline, cross-shape translation when routed to an Anthropic provider |
 
-Proxy endpoints arriving in later phases:
+Routing is controlled by virtual model aliases (`default`, `fast`, `frontier`) and the `x-llm-tier` header. Responses carry `x-llm-cache` (hit or miss) and `x-llm-limit` (any exceeded budget or rate limit).
 
-| Method | Path | Phase |
-|--------|------|-------|
-| POST | `/v1/chat/completions` | P4 |
+## Deployment
+
+A Helm chart lives in `charts/llm-gateway` (Deployment, Service, Ingress, HPA, ConfigMap, Secret, ServiceAccount). Provider keys and DSNs are injected from a Kubernetes Secret; the gateway config is rendered into a ConfigMap. Run `helm lint charts/llm-gateway` and `helm template charts/llm-gateway` to validate before installing.
 
 ## Development
 

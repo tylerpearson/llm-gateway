@@ -6,6 +6,8 @@
 package proxy
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -17,11 +19,20 @@ import (
 
 	"github.com/tylerpearson/llm-gateway/internal/attribution"
 	"github.com/tylerpearson/llm-gateway/internal/auth"
+	"github.com/tylerpearson/llm-gateway/internal/cache"
 	"github.com/tylerpearson/llm-gateway/internal/pricing"
 	"github.com/tylerpearson/llm-gateway/internal/provider"
 	"github.com/tylerpearson/llm-gateway/internal/provider/translate"
 	"github.com/tylerpearson/llm-gateway/internal/router"
 )
+
+// ResponseCache is the response cache the proxy consults. cache.Cache satisfies
+// it; tests provide a fake.
+type ResponseCache interface {
+	Get(ctx context.Context, key string) (*cache.Entry, bool)
+	Set(ctx context.Context, key string, e *cache.Entry)
+	MaxBytes() int
+}
 
 // maxRequestBytes bounds the inbound body size. Long context requests are large
 // but not unbounded; this guards against memory exhaustion.
@@ -35,6 +46,7 @@ type Handler struct {
 	log      *slog.Logger
 	pricing  pricing.Table
 	recorder attribution.Recorder
+	cache    ResponseCache
 }
 
 // Option customizes a Handler.
@@ -47,6 +59,11 @@ func WithAttribution(rec attribution.Recorder, table pricing.Table) Option {
 		h.recorder = rec
 		h.pricing = table
 	}
+}
+
+// WithCache enables the exact-match response cache.
+func WithCache(c ResponseCache) Option {
+	return func(h *Handler) { h.cache = c }
 }
 
 // New builds a proxy handler over the provider registry and router.
@@ -102,6 +119,17 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, clientShape prov
 		return
 	}
 
+	// Cache lookup on the exact request. A hit replays the stored response
+	// without touching the upstream.
+	var cacheKey string
+	if h.cache != nil {
+		cacheKey = cache.Key(clientShape, target.Provider, target.Model, body)
+		if entry, ok := h.cache.Get(r.Context(), cacheKey); ok {
+			h.serveCacheHit(w, r, reqID, meta.Model, meta.Stream, target, entry, start)
+			return
+		}
+	}
+
 	sendBody, err := buildBody(body, clientShape, target)
 	if err != nil {
 		h.log.Error("request translation failed", slog.String("request_id", reqID), slog.Any("error", err))
@@ -126,7 +154,21 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, clientShape prov
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	usage, written, relayErr := h.relayResponse(w, resp, clientShape, target, meta.Stream)
+	var capture *boundedBuffer
+	if h.cache != nil {
+		capture = &boundedBuffer{limit: h.cache.MaxBytes()}
+	}
+	usage, written, relayErr := h.relayResponse(w, resp, clientShape, target, meta.Stream, capture)
+
+	// Store a successful, fully captured response for future identical requests.
+	if h.cache != nil && capture != nil && !capture.truncated && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		h.cache.Set(r.Context(), cacheKey, &cache.Entry{
+			Status:      resp.StatusCode,
+			ContentType: contentType(meta.Stream),
+			Body:        capture.Bytes(),
+			Usage:       usage,
+		})
+	}
 
 	h.log.Info("proxy request",
 		slog.String("request_id", reqID),
@@ -135,6 +177,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, clientShape prov
 		slog.String("served_model", target.Model),
 		slog.Bool("translated", clientShape != target.Shape),
 		slog.Bool("stream", meta.Stream),
+		slog.Bool("cache_hit", false),
 		slog.Int("status", resp.StatusCode),
 		slog.Int64("response_bytes", written),
 		slog.Int("input_tokens", usage.InputTokens),
@@ -142,10 +185,37 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, clientShape prov
 		slog.Duration("duration", time.Since(start)),
 	)
 	if h.recorder != nil {
-		h.recordAttribution(r, reqID, meta.Model, target, resp.StatusCode, usage, start)
+		h.recordAttribution(r, reqID, meta.Model, target, resp.StatusCode, usage, start, false)
 	}
 	if relayErr != nil {
 		h.log.Warn("response relay interrupted", slog.String("request_id", reqID), slog.Any("error", relayErr))
+	}
+}
+
+// serveCacheHit replays a cached response without calling the upstream.
+func (h *Handler) serveCacheHit(w http.ResponseWriter, r *http.Request, reqID, requestedModel string, stream bool, target router.Target, entry *cache.Entry, start time.Time) {
+	w.Header().Set("Content-Type", entry.ContentType)
+	w.Header().Set("x-llm-cache", "hit")
+	w.WriteHeader(entry.Status)
+	_, _ = w.Write(entry.Body)
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
+	h.log.Info("proxy request",
+		slog.String("request_id", reqID),
+		slog.String("provider", target.Provider),
+		slog.String("requested_model", requestedModel),
+		slog.String("served_model", target.Model),
+		slog.Bool("translated", false),
+		slog.Bool("stream", stream),
+		slog.Bool("cache_hit", true),
+		slog.Int("status", entry.Status),
+		slog.Int("input_tokens", entry.Usage.InputTokens),
+		slog.Int("output_tokens", entry.Usage.OutputTokens),
+		slog.Duration("duration", time.Since(start)),
+	)
+	if h.recorder != nil {
+		h.recordAttribution(r, reqID, requestedModel, target, entry.Status, entry.Usage, start, true)
 	}
 }
 
@@ -153,15 +223,23 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, clientShape prov
 // across shapes when needed, and returns the captured usage and bytes written.
 // Error responses and same-shape responses are relayed verbatim; only
 // successful cross-shape responses are translated.
-func (h *Handler) relayResponse(w http.ResponseWriter, resp *provider.Response, clientShape provider.Shape, target router.Target, stream bool) (provider.Usage, int64, error) {
+func (h *Handler) relayResponse(w http.ResponseWriter, resp *provider.Response, clientShape provider.Shape, target router.Target, stream bool, capture *boundedBuffer) (provider.Usage, int64, error) {
 	w.Header().Set("Content-Type", contentType(stream))
+	if h.cache != nil {
+		w.Header().Set("x-llm-cache", "miss")
+	}
 	w.WriteHeader(resp.StatusCode)
 
 	sameShape := clientShape == target.Shape
 	if sameShape || resp.StatusCode >= 400 {
 		prov, _ := h.registry.Get(target.Provider)
 		scanner := prov.NewUsageScanner(resp.Stream)
-		written, err := relay(w, resp.Body, scanner)
+		// Tee the client-facing bytes into the cache capture buffer as well.
+		var tee io.Writer = scanner
+		if capture != nil {
+			tee = io.MultiWriter(scanner, capture)
+		}
+		written, err := relay(w, resp.Body, tee)
 		var usage provider.Usage
 		if resp.StatusCode < 400 {
 			usage = scanner.Usage()
@@ -170,7 +248,7 @@ func (h *Handler) relayResponse(w http.ResponseWriter, resp *provider.Response, 
 	}
 
 	// Cross-shape success: translate the body to the client's shape.
-	fw := &flushWriter{w: w}
+	fw := &flushWriter{w: w, capture: capture}
 	if f, ok := w.(http.Flusher); ok {
 		fw.flusher = f
 	}
@@ -250,21 +328,49 @@ func relay(w http.ResponseWriter, body io.Reader, scanner io.Writer) (int64, err
 }
 
 // flushWriter flushes the underlying ResponseWriter after each write so
-// translated stream events reach the client promptly. It counts bytes written.
+// translated stream events reach the client promptly. It counts bytes written
+// and optionally tees them into a capture buffer for caching.
 type flushWriter struct {
 	w       io.Writer
 	flusher http.Flusher
+	capture *boundedBuffer
 	written int64
 }
 
 func (fw *flushWriter) Write(p []byte) (int, error) {
 	n, err := fw.w.Write(p)
 	fw.written += int64(n)
+	if fw.capture != nil {
+		_, _ = fw.capture.Write(p[:n])
+	}
 	if fw.flusher != nil {
 		fw.flusher.Flush()
 	}
 	return n, err
 }
+
+// boundedBuffer accumulates bytes up to a limit. Once the limit is exceeded it
+// marks itself truncated and discards its contents, signaling that the
+// response is too large to cache.
+type boundedBuffer struct {
+	buf       bytes.Buffer
+	limit     int
+	truncated bool
+}
+
+func (b *boundedBuffer) Write(p []byte) (int, error) {
+	if !b.truncated {
+		if b.buf.Len()+len(p) > b.limit {
+			b.truncated = true
+			b.buf.Reset()
+		} else {
+			b.buf.Write(p)
+		}
+	}
+	return len(p), nil
+}
+
+func (b *boundedBuffer) Bytes() []byte { return b.buf.Bytes() }
 
 // passthroughHeaders selects inbound headers that upstream adapters may need.
 // Client auth is never forwarded; the gateway attaches its own credentials.
@@ -277,9 +383,13 @@ func passthroughHeaders(in http.Header) http.Header {
 }
 
 // recordAttribution computes the request cost and enqueues an attribution
-// record attributed to the authenticated key and team.
-func (h *Handler) recordAttribution(r *http.Request, reqID, requestedModel string, target router.Target, status int, usage provider.Usage, start time.Time) {
-	cost, _ := h.pricing.Cost(target.Model, usage.InputTokens, usage.OutputTokens, usage.CacheReadTokens, usage.CacheWriteTokens)
+// record attributed to the authenticated key and team. A cache hit is recorded
+// with zero cost since it incurred no upstream spend.
+func (h *Handler) recordAttribution(r *http.Request, reqID, requestedModel string, target router.Target, status int, usage provider.Usage, start time.Time, cacheHit bool) {
+	var cost float64
+	if !cacheHit {
+		cost, _ = h.pricing.Cost(target.Model, usage.InputTokens, usage.OutputTokens, usage.CacheReadTokens, usage.CacheWriteTokens)
+	}
 
 	var keyID, teamID string
 	if p, ok := auth.FromContext(r.Context()); ok {
@@ -300,7 +410,7 @@ func (h *Handler) recordAttribution(r *http.Request, reqID, requestedModel strin
 		CacheWriteTokens: usage.CacheWriteTokens,
 		CostUSD:          cost,
 		LatencyMS:        time.Since(start).Milliseconds(),
-		CacheHit:         false,
+		CacheHit:         cacheHit,
 		Status:           status,
 	})
 }

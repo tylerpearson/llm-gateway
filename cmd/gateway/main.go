@@ -8,12 +8,17 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"sort"
 	"syscall"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 
 	"github.com/tylerpearson/llm-gateway/internal/config"
+	"github.com/tylerpearson/llm-gateway/internal/provider"
+	"github.com/tylerpearson/llm-gateway/internal/provider/anthropic"
+	"github.com/tylerpearson/llm-gateway/internal/proxy"
 	"github.com/tylerpearson/llm-gateway/internal/server"
 )
 
@@ -42,10 +47,23 @@ func run(configPath string) error {
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 	)
 
-	srv := server.New(cfg.Server, log, reg)
+	providers := buildProviders(cfg.Providers, log)
 
-	// Startup wiring (stores, providers, caches) lands in later phases. Once it
-	// completes the gateway is ready to take traffic.
+	var routeFns []func(chi.Router)
+	if msgProvider := selectMessagesProvider(cfg, providers); msgProvider != nil {
+		h := proxy.New(msgProvider, log)
+		routeFns = append(routeFns, func(r chi.Router) {
+			r.Post("/v1/messages", h.Messages)
+		})
+		log.Info("mounted /v1/messages", slog.String("provider", msgProvider.Name()))
+	} else {
+		log.Warn("no anthropic provider configured; /v1/messages not mounted")
+	}
+
+	srv := server.New(cfg.Server, log, reg, routeFns...)
+
+	// Remaining startup wiring (stores, caches, rate limits) lands in later
+	// phases. Once wiring completes the gateway is ready to take traffic.
 	srv.SetReady(true)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -64,6 +82,54 @@ func run(configPath string) error {
 		defer cancel()
 		return srv.Shutdown(shutdownCtx)
 	}
+}
+
+// buildProviders constructs upstream adapters from config. Only the anthropic
+// adapter exists in P1; openai and glm are wired in P4.
+func buildProviders(pcs map[string]config.Provider, log *slog.Logger) provider.Registry {
+	reg := provider.Registry{}
+	for name, pc := range pcs {
+		switch pc.Type {
+		case "anthropic":
+			reg[name] = anthropic.New(name, pc.BaseURL, pc.APIKey)
+		case "openai", "glm":
+			log.Debug("provider type not yet implemented; skipping",
+				slog.String("name", name), slog.String("type", pc.Type))
+		default:
+			log.Warn("unknown provider type; skipping",
+				slog.String("name", name), slog.String("type", pc.Type))
+		}
+	}
+	return reg
+}
+
+// selectMessagesProvider picks the anthropic-shaped provider that serves
+// /v1/messages in P1. It prefers the provider behind the default alias, then
+// falls back to the first anthropic provider by name. Full alias and tier
+// routing arrives in P4.
+func selectMessagesProvider(cfg *config.Config, reg provider.Registry) provider.Provider {
+	if cfg.Routing.DefaultAlias != "" {
+		if route, ok := cfg.Routing.Aliases[cfg.Routing.DefaultAlias]; ok {
+			if pc, ok := cfg.Providers[route.Provider]; ok && pc.Type == "anthropic" {
+				if p, ok := reg.Get(route.Provider); ok {
+					return p
+				}
+			}
+		}
+	}
+	names := make([]string, 0, len(cfg.Providers))
+	for name, pc := range cfg.Providers {
+		if pc.Type == "anthropic" {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	if len(names) > 0 {
+		if p, ok := reg.Get(names[0]); ok {
+			return p
+		}
+	}
+	return nil
 }
 
 func newLogger(cfg config.Logging) *slog.Logger {

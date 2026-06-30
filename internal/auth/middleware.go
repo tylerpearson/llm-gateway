@@ -29,16 +29,25 @@ type Lookup interface {
 // revocation SLA: after gatewayctl disables a key, this instance may still
 // accept it for up to ttl. Keep the TTL short, or set it to a small value via
 // config, when fast revocation matters more than database load.
+//
+// The cache also stores negative entries (key == nil) for hashes the store
+// reports as store.ErrNotFound. Without this, a flood of invalid or garbage
+// API keys turns into one store lookup per request: an unauthenticated
+// database-amplification path. Negative entries share the positive TTL and
+// the same entry cap, so the cache stays bounded under either kind of flood.
 type Authenticator struct {
 	store Lookup
 	log   *slog.Logger
 	ttl   time.Duration
 
-	mu    sync.RWMutex
-	cache map[string]cacheEntry
+	mu         sync.RWMutex
+	cache      map[string]cacheEntry
+	maxEntries int
 }
 
 type cacheEntry struct {
+	// key is nil for a negative entry: a hash known, as of expires, not to
+	// resolve to any virtual key.
 	key     *store.VirtualKey
 	expires time.Time
 }
@@ -46,8 +55,14 @@ type cacheEntry struct {
 // DefaultCacheTTL is the default lifetime of a cached key lookup, and so the
 // default upper bound on how long a disabled key keeps working after it is
 // revoked. Kept short to bound that revocation window; operators who need
-// stricter revocation can lower it via config.
+// stricter revocation can lower it via config. The same TTL bounds negative
+// (not-found) entries.
 const DefaultCacheTTL = 5 * time.Second
+
+// maxCacheEntries bounds the lookup cache so a flood of unique invalid or
+// valid keys cannot grow the map without limit. It applies to positive and
+// negative entries combined.
+const maxCacheEntries = 50000
 
 // New builds an Authenticator. A ttl of 0 uses DefaultCacheTTL.
 func New(s Lookup, log *slog.Logger, ttl time.Duration) *Authenticator {
@@ -55,10 +70,11 @@ func New(s Lookup, log *slog.Logger, ttl time.Duration) *Authenticator {
 		ttl = DefaultCacheTTL
 	}
 	return &Authenticator{
-		store: s,
-		log:   log,
-		ttl:   ttl,
-		cache: make(map[string]cacheEntry),
+		store:      s,
+		log:        log,
+		ttl:        ttl,
+		cache:      make(map[string]cacheEntry),
+		maxEntries: maxCacheEntries,
 	}
 }
 
@@ -101,24 +117,59 @@ func (a *Authenticator) Middleware(next http.Handler) http.Handler {
 	})
 }
 
-// lookup checks the positive cache, then the store, caching hits for ttl.
+// lookup checks the cache (positive or negative), then the store, caching
+// the result for ttl. Only store.ErrNotFound is cached negatively; any other
+// store error (for example a backend outage) is returned uncached so the
+// next request retries the store and the failure keeps surfacing as 503.
 func (a *Authenticator) lookup(ctx context.Context, hash string) (*store.VirtualKey, error) {
 	a.mu.RLock()
 	entry, ok := a.cache[hash]
 	a.mu.RUnlock()
 	if ok && time.Now().Before(entry.expires) {
+		if entry.key == nil {
+			return nil, store.ErrNotFound
+		}
 		return entry.key, nil
 	}
 
 	vk, err := a.store.LookupKeyByHash(ctx, hash)
 	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			a.setCache(hash, nil)
+		}
 		return nil, err
 	}
 
-	a.mu.Lock()
-	a.cache[hash] = cacheEntry{key: vk, expires: time.Now().Add(a.ttl)}
-	a.mu.Unlock()
+	a.setCache(hash, vk)
 	return vk, nil
+}
+
+// setCache inserts a cache entry for hash, enforcing maxEntries. A nil key
+// records a negative (not-found) entry. If the cache is at or over capacity,
+// expired entries are swept first; if it is still at capacity afterward, the
+// entry is dropped and the lookup falls back to the store next time rather
+// than letting the map grow without bound.
+func (a *Authenticator) setCache(hash string, vk *store.VirtualKey) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if len(a.cache) >= a.maxEntries {
+		a.sweepExpiredLocked()
+		if len(a.cache) >= a.maxEntries {
+			return
+		}
+	}
+	a.cache[hash] = cacheEntry{key: vk, expires: time.Now().Add(a.ttl)}
+}
+
+// sweepExpiredLocked removes expired entries. Callers must hold a.mu.
+func (a *Authenticator) sweepExpiredLocked() {
+	now := time.Now()
+	for h, e := range a.cache {
+		if now.After(e.expires) {
+			delete(a.cache, h)
+		}
+	}
 }
 
 // extractKey reads the virtual key from the Anthropic (x-api-key) or OpenAI

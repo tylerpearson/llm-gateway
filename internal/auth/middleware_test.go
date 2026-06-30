@@ -3,11 +3,13 @@ package auth
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/tylerpearson/llm-gateway/internal/store"
 )
@@ -145,5 +147,72 @@ func TestMiddleware_CachesPositiveLookups(t *testing.T) {
 	}
 	if look.calls != 1 {
 		t.Errorf("store lookups = %d, want 1 (cached)", look.calls)
+	}
+}
+
+// TestMiddleware_CachesNegativeLookups verifies that repeated requests with
+// the same unknown key hit the store once: the negative cache entry answers
+// every request inside the TTL window without calling the store, which is
+// the fix for the invalid-key database amplification finding.
+func TestMiddleware_CachesNegativeLookups(t *testing.T) {
+	look := &fakeLookup{keys: map[string]*store.VirtualKey{}}
+	h := testAuth(t, look).Middleware(http.HandlerFunc(principalEcho))
+
+	for i := 0; i < 3; i++ {
+		req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+		req.Header.Set("x-api-key", "llmgw_invalid")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("request %d: status %d, want 401", i, rec.Code)
+		}
+	}
+	if look.calls != 1 {
+		t.Errorf("store lookups = %d, want 1 (negative cache hit)", look.calls)
+	}
+}
+
+// TestMiddleware_BackendErrorNotCached verifies that a non-ErrNotFound store
+// error (for example a backend outage) is never cached: every request must
+// retry the store and keep surfacing as 503, unlike a genuinely invalid key.
+func TestMiddleware_BackendErrorNotCached(t *testing.T) {
+	look := &fakeLookup{err: errors.New("db down")}
+	h := testAuth(t, look).Middleware(http.HandlerFunc(principalEcho))
+
+	for i := 0; i < 2; i++ {
+		req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+		req.Header.Set("x-api-key", "llmgw_x")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusServiceUnavailable {
+			t.Fatalf("request %d: status %d, want 503", i, rec.Code)
+		}
+	}
+	if look.calls != 2 {
+		t.Errorf("store lookups = %d, want 2 (no caching of backend errors)", look.calls)
+	}
+}
+
+// TestAuthenticator_CacheCapBounded verifies that flooding the authenticator
+// with unique key hashes, positive or negative, cannot grow the cache beyond
+// its configured cap.
+func TestAuthenticator_CacheCapBounded(t *testing.T) {
+	const limit = 10
+	look := &fakeLookup{keys: map[string]*store.VirtualKey{}}
+	a := New(look, slog.New(slog.NewTextHandler(io.Discard, nil)), time.Hour)
+	a.maxEntries = limit
+
+	for i := 0; i < limit*5; i++ {
+		hash := HashKey(fmt.Sprintf("llmgw_unique_%d", i))
+		if _, err := a.lookup(context.Background(), hash); err == nil {
+			t.Fatalf("lookup %d: want ErrNotFound, got nil error", i)
+		}
+	}
+
+	a.mu.RLock()
+	n := len(a.cache)
+	a.mu.RUnlock()
+	if n > limit {
+		t.Errorf("cache size = %d, want <= %d", n, limit)
 	}
 }

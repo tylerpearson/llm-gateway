@@ -14,3 +14,9 @@ coverage.*
 .DS_Store
 .idea/
 .vscode/
+
+# Local config (copy of config.example.yaml with real values; never committed)
+/configs/config.yaml
+
+# Coverage output
+/coverage.out

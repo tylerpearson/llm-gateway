@@ -70,4 +70,42 @@ func TestMySQLRoundTrip(t *testing.T) {
 	if err != nil || len(teams) == 0 {
 		t.Fatalf("list teams err %v len %d", err, len(teams))
 	}
+
+	// Disable the key and confirm the lookup reflects it.
+	if err := s.DisableKey(ctx, vk.ID); err != nil {
+		t.Fatalf("disable key: %v", err)
+	}
+	after, err := s.LookupKeyByHash(ctx, auth.HashKey(plaintext))
+	if err != nil {
+		t.Fatalf("lookup after disable: %v", err)
+	}
+	if !after.Disabled {
+		t.Error("key should be disabled after DisableKey")
+	}
+	if err := s.DisableKey(ctx, "no-such-key"); err != store.ErrNotFound {
+		t.Errorf("disable unknown key err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestMySQLAuditLog(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	target := store.NewID()
+	if err := s.RecordAudit(ctx, "tester", "key.create", target, "name=ci"); err != nil {
+		t.Fatalf("record audit: %v", err)
+	}
+	entries, err := s.ListAudit(ctx, 50)
+	if err != nil {
+		t.Fatalf("list audit: %v", err)
+	}
+	found := false
+	for _, e := range entries {
+		if e.Target == target && e.Action == "key.create" && e.Actor == "tester" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("recorded audit entry not found in ListAudit")
+	}
 }

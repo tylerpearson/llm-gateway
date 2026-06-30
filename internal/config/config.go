@@ -21,6 +21,15 @@ type Config struct {
 	Routing   Routing             `yaml:"routing"`
 	Storage   Storage             `yaml:"storage"`
 	Limits    Limits              `yaml:"limits"`
+	Security  Security            `yaml:"security"`
+}
+
+// Security holds hardening toggles. RedactPrompts (default true) keeps prompt
+// and response content out of logs and analytics; the gateway never persists
+// request or response bodies, and prompt previews are logged only when this is
+// explicitly disabled.
+type Security struct {
+	RedactPrompts *bool `yaml:"redact_prompts"`
 }
 
 // Limits configures per key and per team budgets and rate limits. A limit of 0
@@ -140,6 +149,16 @@ func (c *Config) applyDefaults() {
 	if c.Limits.Mode == "" {
 		c.Limits.Mode = "soft"
 	}
+	if c.Security.RedactPrompts == nil {
+		t := true
+		c.Security.RedactPrompts = &t
+	}
+}
+
+// RedactPrompts reports whether prompt and response content must be kept out of
+// logs. It defaults to true.
+func (c *Config) RedactPrompts() bool {
+	return c.Security.RedactPrompts == nil || *c.Security.RedactPrompts
 }
 
 // applyEnv resolves secrets and connection strings from the environment so they

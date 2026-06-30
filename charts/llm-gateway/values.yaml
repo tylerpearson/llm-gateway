@@ -1,0 +1,219 @@
+# Default values for llm-gateway.
+# Override these in a separate values file or with --set flags.
+
+# -- Number of pod replicas. Ignored when autoscaling.enabled is true.
+replicaCount: 1
+
+image:
+  # -- Container image repository.
+  repository: ghcr.io/tylerpearson/llm-gateway
+  # -- Image pull policy.
+  pullPolicy: IfNotPresent
+  # -- Overrides the image tag. Defaults to the chart appVersion.
+  tag: ""
+
+# -- Image pull secrets for private registries.
+imagePullSecrets: []
+
+# -- Override the chart name used in resource labels.
+nameOverride: ""
+
+# -- Override the full resource name prefix.
+fullnameOverride: ""
+
+serviceAccount:
+  # -- Create a ServiceAccount for the gateway pods.
+  create: true
+  # -- Annotations to add to the ServiceAccount.
+  annotations: {}
+  # -- The name of the ServiceAccount to use.
+  # If not set and create is true, a name is generated using the fullname template.
+  name: ""
+
+# -- Annotations added to every pod.
+podAnnotations:
+  # -- Prometheus scrape annotations. Set scrape to "false" to disable.
+  prometheus.io/scrape: "true"
+  prometheus.io/port: "8080"
+  prometheus.io/path: "/metrics"
+
+# -- Pod-level security context (applied to the pod, not individual containers).
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+# -- Container-level security context.
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+service:
+  # -- Kubernetes Service type.
+  type: ClusterIP
+  # -- Service port (and target container port).
+  port: 8080
+
+ingress:
+  # -- Enable an Ingress resource.
+  enabled: false
+  # -- Ingress class name (e.g. nginx, traefik, gce).
+  className: ""
+  # -- Annotations for the Ingress resource.
+  annotations: {}
+    # kubernetes.io/ingress.class: nginx
+    # cert-manager.io/cluster-issuer: letsencrypt-prod
+  # -- Ingress host rules.
+  hosts:
+    - host: llm-gateway.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  # -- TLS configuration for the Ingress.
+  tls: []
+  #  - secretName: llm-gateway-tls
+  #    hosts:
+  #      - llm-gateway.example.com
+
+resources:
+  # -- Resource limits for the gateway container.
+  limits:
+    cpu: 500m
+    memory: 256Mi
+  # -- Resource requests for the gateway container.
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+autoscaling:
+  # -- Enable a HorizontalPodAutoscaler.
+  enabled: false
+  # -- Minimum number of replicas.
+  minReplicas: 1
+  # -- Maximum number of replicas.
+  maxReplicas: 5
+  # -- Target average CPU utilization percentage.
+  targetCPUUtilizationPercentage: 80
+  # -- Target average memory utilization percentage (optional, remove to disable).
+  # targetMemoryUtilizationPercentage: 80
+
+# -- Node selector for pod scheduling.
+nodeSelector: {}
+
+# -- Tolerations for pod scheduling.
+tolerations: []
+
+# -- Affinity rules for pod scheduling.
+affinity: {}
+
+# -- Extra non-secret environment variables injected directly into the container.
+# These supplement the secret env vars sourced from the Secret resource.
+env: {}
+  # LOG_LEVEL: debug
+
+# -- Secret configuration. The chart can either manage a Secret containing API
+# keys and DSNs, or you can provide an existing secret.
+secretEnv:
+  # -- When true, create a Kubernetes Secret from the values below.
+  # Set to false and provide existingSecret to use a pre-existing Secret.
+  create: true
+
+  # -- Name of an existing Secret to use instead of creating one.
+  # Ignored when create is true. The existing secret must contain the keys
+  # listed under envKeys.
+  existingSecret: ""
+
+  # -- Actual secret values (only used when create is true).
+  # In production, supply these via --set secretEnv.values.ANTHROPIC_API_KEY=...
+  # or a sealed-secrets / external-secrets workflow -- never commit real keys.
+  values:
+    ANTHROPIC_API_KEY: ""
+    OPENAI_API_KEY: ""
+    GLM_API_KEY: ""
+    MYSQL_DSN: ""
+    CLICKHOUSE_DSN: ""
+    REDIS_ADDR: ""
+
+  # -- Keys from the Secret that are injected as environment variables.
+  # These names must match what the config file references via api_key_env /
+  # mysql_dsn_env / etc.
+  envKeys:
+    - ANTHROPIC_API_KEY
+    - OPENAI_API_KEY
+    - GLM_API_KEY
+    - MYSQL_DSN
+    - CLICKHOUSE_DSN
+    - REDIS_ADDR
+
+# -- Gateway configuration rendered into a ConfigMap and mounted at
+# /app/configs/config.yaml inside the container.
+# Mirrors the shape of configs/config.example.yaml.
+config:
+  server:
+    addr: ":8080"
+    read_timeout: 30s
+    # write_timeout 0s keeps streaming responses open without a deadline.
+    write_timeout: 0s
+    shutdown_timeout: 15s
+
+  logging:
+    # -- Log level: debug | info | warn | error
+    level: info
+    # -- Log format: json | text
+    format: json
+
+  # -- Upstream AI providers. The actual API keys are read from the env vars
+  # named by api_key_env (injected by the Secret, never stored in the config).
+  providers:
+    anthropic:
+      type: anthropic
+      base_url: https://api.anthropic.com
+      api_key_env: ANTHROPIC_API_KEY
+    openai:
+      type: openai
+      base_url: https://api.openai.com
+      api_key_env: OPENAI_API_KEY
+    glm:
+      type: openai
+      base_url: https://open.bigmodel.cn/api/paas/v4
+      api_key_env: GLM_API_KEY
+
+  # -- Virtual model aliases mapped to concrete provider + model targets.
+  routing:
+    default_alias: default
+    aliases:
+      default:
+        provider: anthropic
+        model: claude-haiku-4-5-20251001
+      fast:
+        provider: openai
+        model: gpt-4o-mini
+      frontier:
+        provider: anthropic
+        model: claude-opus-4-8
+
+  # -- Backend storage connection strings (resolved from env vars at runtime).
+  storage:
+    mysql_dsn_env: MYSQL_DSN
+    clickhouse_dsn_env: CLICKHOUSE_DSN
+    redis_addr_env: REDIS_ADDR
+
+  # -- Budget and rate limits tracked per key / per team in Redis.
+  # 0 means unlimited. mode: soft allows the request and reports on
+  # x-llm-limit header; mode: hard rejects with HTTP 429.
+  limits:
+    mode: soft
+    per_key:
+      requests_per_min: 0
+      tokens_per_min: 0
+      monthly_usd: 0
+    per_team:
+      requests_per_min: 0
+      tokens_per_min: 0
+      monthly_usd: 0

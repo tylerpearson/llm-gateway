@@ -8,12 +8,21 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/user"
 	"time"
 
 	"github.com/tylerpearson/llm-gateway/internal/auth"
 	"github.com/tylerpearson/llm-gateway/internal/store/clickhouse"
 	"github.com/tylerpearson/llm-gateway/internal/store/mysql"
 )
+
+// actor identifies who performed an administrative action for the audit log.
+func actor() string {
+	if u, err := user.Current(); err == nil && u.Username != "" {
+		return u.Username
+	}
+	return "gatewayctl"
+}
 
 func main() {
 	if len(os.Args) < 2 {
@@ -28,6 +37,8 @@ func main() {
 		err = cmdTeam(os.Args[2:])
 	case "key":
 		err = cmdKey(os.Args[2:])
+	case "audit":
+		err = cmdAudit(os.Args[2:])
 	case "version":
 		fmt.Println("gatewayctl v0 (P2)")
 	case "-h", "--help", "help":
@@ -52,6 +63,8 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  team list               list teams")
 	fmt.Fprintln(os.Stderr, "  key create --team <id> --name <name> [--alias <alias>]")
 	fmt.Fprintln(os.Stderr, "  key list --team <id>    list a team's keys")
+	fmt.Fprintln(os.Stderr, "  key disable --id <id>   disable a key")
+	fmt.Fprintln(os.Stderr, "  audit [--limit N]       show recent audit log entries")
 	fmt.Fprintln(os.Stderr, "  version                 print version")
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "MYSQL_DSN must be set (or pass --dsn).")
@@ -134,6 +147,7 @@ func cmdTeam(args []string) error {
 		if err != nil {
 			return err
 		}
+		_ = s.RecordAudit(c, actor(), "team.create", t.ID, "name="+t.Name)
 		fmt.Printf("created team\n  id:   %s\n  name: %s\n", t.ID, t.Name)
 		return nil
 	case "list":
@@ -191,6 +205,7 @@ func cmdKey(args []string) error {
 		if err != nil {
 			return err
 		}
+		_ = s.RecordAudit(c, actor(), "key.create", vk.ID, "team="+vk.TeamID+" name="+vk.Name)
 		fmt.Printf("created virtual key\n  id:    %s\n  team:  %s\n  name:  %s\n", vk.ID, vk.TeamID, vk.Name)
 		if vk.DefaultAlias != "" {
 			fmt.Printf("  alias: %s\n", vk.DefaultAlias)
@@ -226,7 +241,55 @@ func cmdKey(args []string) error {
 			fmt.Printf("%s  %-20s  %s  alias=%s\n", k.ID, k.Name, status, k.DefaultAlias)
 		}
 		return nil
+	case "disable":
+		fs := flag.NewFlagSet("key disable", flag.ExitOnError)
+		dsn := fs.String("dsn", "", "MySQL DSN (defaults to MYSQL_DSN env)")
+		id := fs.String("id", "", "key id (required)")
+		_ = fs.Parse(args[1:])
+		if *id == "" {
+			return fmt.Errorf("key disable requires --id")
+		}
+
+		s, err := openStore(*dsn)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = s.Close() }()
+
+		c, cancel := ctx()
+		defer cancel()
+		if err := s.DisableKey(c, *id); err != nil {
+			return err
+		}
+		_ = s.RecordAudit(c, actor(), "key.disable", *id, "")
+		fmt.Printf("disabled key %s\n", *id)
+		return nil
 	default:
-		return fmt.Errorf("usage: gatewayctl key <create|list>")
+		return fmt.Errorf("usage: gatewayctl key <create|list|disable>")
 	}
+}
+
+func cmdAudit(args []string) error {
+	fs := flag.NewFlagSet("audit", flag.ExitOnError)
+	dsn := fs.String("dsn", "", "MySQL DSN (defaults to MYSQL_DSN env)")
+	limit := fs.Int("limit", 50, "max entries to show")
+	_ = fs.Parse(args)
+
+	s, err := openStore(*dsn)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = s.Close() }()
+
+	c, cancel := ctx()
+	defer cancel()
+	entries, err := s.ListAudit(c, *limit)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		fmt.Printf("%s  %-16s  %-12s  %s  %s\n",
+			e.CreatedAt.Format(time.RFC3339), e.Actor, e.Action, e.Target, e.Details)
+	}
+	return nil
 }

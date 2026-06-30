@@ -55,9 +55,10 @@ type Handler struct {
 	log      *slog.Logger
 	pricing  pricing.Table
 	recorder attribution.Recorder
-	cache    ResponseCache
-	limiter  RateLimiter
-	metrics  *metrics.Metrics
+	cache         ResponseCache
+	limiter       RateLimiter
+	metrics       *metrics.Metrics
+	redactPrompts bool
 }
 
 // Option customizes a Handler.
@@ -107,9 +108,16 @@ func (h *Handler) liveCacheLabel() string {
 	return ""
 }
 
-// New builds a proxy handler over the provider registry and router.
+// WithPromptRedaction controls whether prompt and response content stays out of
+// logs. Redaction is on by default; passing false enables debug prompt previews.
+func WithPromptRedaction(redact bool) Option {
+	return func(h *Handler) { h.redactPrompts = redact }
+}
+
+// New builds a proxy handler over the provider registry and router. Prompt
+// redaction is on by default.
 func New(registry provider.Registry, rtr *router.Router, log *slog.Logger, opts ...Option) *Handler {
-	h := &Handler{registry: registry, router: rtr, log: log}
+	h := &Handler{registry: registry, router: rtr, log: log, redactPrompts: true}
 	for _, opt := range opts {
 		opt(h)
 	}
@@ -142,6 +150,11 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, clientShape prov
 	if err := json.Unmarshal(body, &meta); err != nil {
 		h.writeError(w, http.StatusBadRequest, "invalid_request_error", "request body is not valid JSON")
 		return
+	}
+	// Prompt content is never persisted. It is logged only when redaction is
+	// explicitly disabled, and then only as a short debug preview.
+	if !h.redactPrompts {
+		h.log.Debug("request prompt preview", slog.String("request_id", reqID), slog.String("preview", preview(body)))
 	}
 
 	keyDefault := ""
@@ -358,6 +371,15 @@ func contentType(stream bool) string {
 		return "text/event-stream"
 	}
 	return "application/json"
+}
+
+// preview returns a short, truncated view of a body for debug logging.
+func preview(body []byte) string {
+	const max = 256
+	if len(body) > max {
+		return string(body[:max]) + "..."
+	}
+	return string(body)
 }
 
 // setModel rewrites the top level model field without disturbing other fields.

@@ -68,7 +68,7 @@ All four gates (build, test, lint, vuln) must be green before a commit lands on 
 
 The project is built in phases P0..P9. Each phase leaves a working, testable gateway. `PLAN.md` is the source of truth for what each phase delivers and the overall architecture. Read it before starting any phase.
 
-Current state: P0 through P3 complete. P0 scaffold (config loader, HTTP server, dev stack, CI); P1 streaming `/v1/messages` proxy to Anthropic with usage capture; P2 virtual key auth backed by MySQL with `gatewayctl` seeding; P3 per-request cost attribution to ClickHouse. Next: P4 (routing, OpenAI and GLM adapters, `/v1/chat/completions`).
+Current state: P0 through P8 complete. P0 scaffold; P1 streaming `/v1/messages` to Anthropic; P2 MySQL virtual key auth with `gatewayctl`; P3 ClickHouse cost attribution; P4 alias/tier routing, OpenAI and GLM adapters, `/v1/chat/completions`, and the `internal/provider/translate` cross-shape module; P5 Redis response cache; P6 per-key and per-team budgets and rate limits; P7 Prometheus metrics and provisioned Grafana dashboards; P8 prompt redaction, audit logging, and the Helm chart in `charts/llm-gateway`. Next: P9 (eval `MirrorHook` interface and ClickHouse eval schema, no-op seams).
 
 Integration tests that need MySQL or ClickHouse live behind the `integration` build tag and skip without a DSN; run them with `go test -tags=integration ./...` (the CI integration job provides both services).
 

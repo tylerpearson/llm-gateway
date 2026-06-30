@@ -119,6 +119,39 @@ routing:
 	}
 }
 
+func TestRedactPromptsDefaultsTrue(t *testing.T) {
+	path := writeConfig(t, "logging:\n  level: info\n")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.RedactPrompts() {
+		t.Error("RedactPrompts should default to true")
+	}
+
+	path2 := writeConfig(t, "security:\n  redact_prompts: false\n")
+	cfg2, err := Load(path2)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg2.RedactPrompts() {
+		t.Error("RedactPrompts should be false when explicitly disabled")
+	}
+}
+
+func TestLimitsModeDefaultAndValidation(t *testing.T) {
+	cfg, err := Load(writeConfig(t, "logging:\n  level: info\n"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Limits.Mode != "soft" {
+		t.Errorf("limits.mode default = %q, want soft", cfg.Limits.Mode)
+	}
+	if _, err := Load(writeConfig(t, "limits:\n  mode: nuke\n")); err == nil {
+		t.Error("expected error for invalid limits.mode")
+	}
+}
+
 func TestLoadMissingFile(t *testing.T) {
 	if _, err := Load(filepath.Join(t.TempDir(), "does-not-exist.yaml")); err == nil {
 		t.Fatal("expected error for missing file, got nil")

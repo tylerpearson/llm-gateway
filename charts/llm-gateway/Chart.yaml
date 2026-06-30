@@ -1,0 +1,16 @@
+apiVersion: v2
+name: llm-gateway
+description: A production-grade LLM gateway that proxies requests to upstream AI providers with routing, rate limiting, and observability.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - llm
+  - ai
+  - gateway
+  - anthropic
+  - openai
+home: https://github.com/tylerpearson/llm-gateway
+maintainers:
+  - name: Tyler Pearson
+    email: ty.pearson@gmail.com

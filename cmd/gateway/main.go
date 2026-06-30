@@ -57,7 +57,13 @@ func run(configPath string) error {
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 	)
-	proxyOpts := []proxy.Option{proxy.WithMetrics(metrics.New(reg))}
+	proxyOpts := []proxy.Option{
+		proxy.WithMetrics(metrics.New(reg)),
+		proxy.WithPromptRedaction(cfg.RedactPrompts()),
+	}
+	if !cfg.RedactPrompts() {
+		log.Warn("prompt redaction disabled: request prompts will be logged at debug level")
+	}
 
 	// Virtual key auth is enabled when a config store is configured. Without
 	// one the gateway runs unauthenticated, which is acceptable only for local

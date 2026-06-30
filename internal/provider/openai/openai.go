@@ -8,7 +8,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
+	"time"
 
 	"github.com/tylerpearson/llm-gateway/internal/provider"
 )
@@ -36,12 +38,44 @@ func New(name, baseURL, apiKey string, opts ...Option) *Provider {
 		name:    name,
 		baseURL: baseURL,
 		apiKey:  apiKey,
-		client:  &http.Client{},
+		// No client timeout: streaming responses can run long, and cancellation
+		// is driven by the request context instead. The transport below bounds
+		// only connection establishment and a fully hung response, never the
+		// duration of an in-progress response body.
+		client: &http.Client{Transport: defaultTransport()},
 	}
 	for _, opt := range opts {
 		opt(p)
 	}
 	return p
+}
+
+// defaultTransport returns a Transport with connection-level timeouts so a
+// hung or slow upstream cannot pin connections indefinitely. There is
+// deliberately no overall client Timeout: streaming bodies can legitimately
+// run for minutes and must not be cut off mid-stream. DialContext and
+// TLSHandshakeTimeout bound connection establishment, which is always safe to
+// time out since no response data is in flight yet. ResponseHeaderTimeout is
+// set generously to 120 seconds because a non-streaming completion may not
+// send response headers until generation is well underway; a short value
+// would wrongly kill long completions. It exists only to bound a connection
+// that hangs forever without ever sending headers, not to bound normal
+// generation latency.
+func defaultTransport() *http.Transport {
+	return &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   10 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		ResponseHeaderTimeout: 120 * time.Second,
+		IdleConnTimeout:       90 * time.Second,
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   10,
+		ForceAttemptHTTP2:     true,
+	}
 }
 
 // Name returns the configured provider name.

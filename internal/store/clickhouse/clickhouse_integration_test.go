@@ -63,3 +63,28 @@ func TestClickHouseInsertAndRead(t *testing.T) {
 		t.Errorf("sum cost = %v, want %v", sumCost, rec.CostUSD)
 	}
 }
+
+// TestEvalTablesExist confirms the v2 eval seam schema is applied by Migrate.
+// The tables are present but unused in v1.
+func TestEvalTablesExist(t *testing.T) {
+	dsn := os.Getenv("CLICKHOUSE_DSN")
+	if dsn == "" {
+		t.Skip("CLICKHOUSE_DSN not set; skipping ClickHouse integration test")
+	}
+	if err := Migrate(dsn); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	s, err := Open(dsn)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	ctx := context.Background()
+	for _, table := range []string{"eval_runs", "eval_results"} {
+		var n uint64
+		if err := s.conn.QueryRow(ctx, "SELECT count() FROM "+table).Scan(&n); err != nil {
+			t.Errorf("query %s: %v", table, err)
+		}
+	}
+}

@@ -21,6 +21,7 @@ import (
 	"github.com/tylerpearson/llm-gateway/internal/attribution"
 	"github.com/tylerpearson/llm-gateway/internal/auth"
 	"github.com/tylerpearson/llm-gateway/internal/cache"
+	"github.com/tylerpearson/llm-gateway/internal/eval"
 	"github.com/tylerpearson/llm-gateway/internal/metrics"
 	"github.com/tylerpearson/llm-gateway/internal/pricing"
 	"github.com/tylerpearson/llm-gateway/internal/provider"
@@ -59,6 +60,7 @@ type Handler struct {
 	limiter       RateLimiter
 	metrics       *metrics.Metrics
 	redactPrompts bool
+	mirror        eval.MirrorHook
 }
 
 // Option customizes a Handler.
@@ -112,6 +114,12 @@ func (h *Handler) liveCacheLabel() string {
 // logs. Redaction is on by default; passing false enables debug prompt previews.
 func WithPromptRedaction(redact bool) Option {
 	return func(h *Handler) { h.redactPrompts = redact }
+}
+
+// WithMirrorHook installs the post-routing mirror hook (a v2 eval seam). The
+// hook is invoked after routing with a snapshot of the request.
+func WithMirrorHook(hook eval.MirrorHook) Option {
+	return func(h *Handler) { h.mirror = hook }
 }
 
 // New builds a proxy handler over the provider registry and router. Prompt
@@ -207,6 +215,19 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, clientShape prov
 				return
 			}
 		}
+	}
+
+	// Post-routing mirror seam for future shadow evaluation (no-op in v1).
+	if h.mirror != nil {
+		h.mirror.Mirror(r.Context(), eval.MirrorRequest{
+			RequestID:      reqID,
+			KeyID:          ident.KeyID,
+			TeamID:         ident.TeamID,
+			RequestedModel: meta.Model,
+			ServedModel:    target.Model,
+			Provider:       target.Provider,
+			Body:           body,
+		})
 	}
 
 	sendBody, err := buildBody(body, clientShape, target)

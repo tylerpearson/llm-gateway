@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 
@@ -57,6 +58,30 @@ func TestReadyzLifecycle(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), `"status":"ready"`) {
 		t.Errorf("body = %q, want status ready", rec.Body.String())
+	}
+}
+
+func TestHTTPServerTimeoutsWired(t *testing.T) {
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	reg := prometheus.NewRegistry()
+	cfg := config.Server{
+		Addr:              ":0",
+		ReadTimeout:       30 * time.Second,
+		ReadHeaderTimeout: 10 * time.Second,
+		WriteTimeout:      0,
+		IdleTimeout:       120 * time.Second,
+	}
+
+	s := New(cfg, log, reg)
+
+	if got := s.httpServer.ReadHeaderTimeout; got != 10*time.Second {
+		t.Errorf("ReadHeaderTimeout = %v, want 10s", got)
+	}
+	if got := s.httpServer.IdleTimeout; got != 120*time.Second {
+		t.Errorf("IdleTimeout = %v, want 120s", got)
+	}
+	if got := s.httpServer.WriteTimeout; got != 0 {
+		t.Errorf("WriteTimeout = %v, want 0 (unset, so streams are not cut off)", got)
 	}
 }
 

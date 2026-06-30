@@ -44,7 +44,7 @@ Request middleware chain: recover + request-id -> auth (virtual key lookup, MySQ
 Virtual model aliases (`default`, `fast`, `frontier`) mapped in config to concrete provider+model, with a per-key/team default. Escalation via the alias or an `x-llm-tier: frontier` header. Concrete model names pass through to their provider. Deterministic in v1 (no complexity heuristic yet).
 
 ### Provider abstraction
-`internal/provider` defines one interface (`Complete(ctx, unifiedReq) -> (stream, usage, err)`) implemented by `anthropic/`, `openai/`, `glm/` adapters that translate the unified request to provider wire format and normalize token usage. Same-shape routing is native; cross-shape cases (an Anthropic `/v1/messages` request routed to an OpenAI-shaped provider like GLM) go through a bounded translation module. This translation layer is the trickiest part and is built and tested in isolation.
+`internal/provider` defines one interface (`Complete(ctx, unifiedReq) -> (stream, usage, err)`) implemented by `anthropic/` and `openai/` adapters that translate the unified request to provider wire format and normalize token usage. GLM is served via the openai adapter configured with GLM's base URL. Same-shape routing is native; cross-shape cases (an Anthropic `/v1/messages` request routed to an OpenAI-shaped provider like GLM) go through a bounded translation module. This translation layer is the trickiest part and is built and tested in isolation.
 
 ### Cost attribution
 `internal/pricing` holds a versioned table of per-model input/output (and Anthropic cache-read/write) rates. Each request computes cost from normalized usage and writes one row to ClickHouse `request_logs` (ts, key, team, requested vs served model, provider, tokens, cost, latency, cache hit, status). Grafana aggregates spend by team/model/day and surfaces top-spending keys (the Pareto heavy hitters).
@@ -69,7 +69,7 @@ llm-gateway/
   cmd/gatewayctl/main.go       # admin CLI (keys, teams, budgets, rules)
   internal/
     config/  server/  middleware/  proxy/
-    provider/{provider.go, anthropic/, openai/, glm/, translate/}
+    provider/{provider.go, anthropic/, openai/, translate/}
     router/  cache/  ratelimit/  attribution/  pricing/
     store/{mysql/, clickhouse/}  metrics/  eval/
   migrations/{mysql/, clickhouse/}

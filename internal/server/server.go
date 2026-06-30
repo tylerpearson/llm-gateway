@@ -26,8 +26,10 @@ type Server struct {
 
 // New builds a Server from the listener config. The Prometheus registry backs
 // the /metrics endpoint; pass a dedicated registry rather than the global one
-// so tests stay isolated.
-func New(cfg config.Server, log *slog.Logger, reg *prometheus.Registry) *Server {
+// so tests stay isolated. Each routeFn mounts additional application routes
+// (for example the proxy endpoints) onto the router after the operational
+// endpoints are registered.
+func New(cfg config.Server, log *slog.Logger, reg *prometheus.Registry, routeFns ...func(chi.Router)) *Server {
 	s := &Server{log: log}
 
 	r := chi.NewRouter()
@@ -38,6 +40,10 @@ func New(cfg config.Server, log *slog.Logger, reg *prometheus.Registry) *Server 
 	r.Get("/healthz", s.handleHealthz)
 	r.Get("/readyz", s.handleReadyz)
 	r.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{Registry: reg}))
+
+	for _, fn := range routeFns {
+		fn(r)
+	}
 
 	s.httpServer = &http.Server{
 		Addr:         cfg.Addr,

@@ -21,6 +21,7 @@ import (
 	"github.com/tylerpearson/llm-gateway/internal/attribution"
 	"github.com/tylerpearson/llm-gateway/internal/auth"
 	"github.com/tylerpearson/llm-gateway/internal/cache"
+	"github.com/tylerpearson/llm-gateway/internal/metrics"
 	"github.com/tylerpearson/llm-gateway/internal/pricing"
 	"github.com/tylerpearson/llm-gateway/internal/provider"
 	"github.com/tylerpearson/llm-gateway/internal/provider/translate"
@@ -56,6 +57,7 @@ type Handler struct {
 	recorder attribution.Recorder
 	cache    ResponseCache
 	limiter  RateLimiter
+	metrics  *metrics.Metrics
 }
 
 // Option customizes a Handler.
@@ -78,6 +80,31 @@ func WithCache(c ResponseCache) Option {
 // WithRateLimit enables budget and rate limit enforcement.
 func WithRateLimit(l RateLimiter) Option {
 	return func(h *Handler) { h.limiter = l }
+}
+
+// WithMetrics enables Prometheus instrumentation.
+func WithMetrics(m *metrics.Metrics) Option {
+	return func(h *Handler) { h.metrics = m }
+}
+
+func (h *Handler) observe(prov, model string, status int, start time.Time, usage provider.Usage, cost float64, cacheResult string) {
+	if h.metrics != nil {
+		h.metrics.ObserveRequest(prov, model, status, time.Since(start), usage.InputTokens, usage.OutputTokens, cost, cacheResult)
+	}
+}
+
+func (h *Handler) costOf(model string, usage provider.Usage) float64 {
+	cost, _ := h.pricing.Cost(model, usage.InputTokens, usage.OutputTokens, usage.CacheReadTokens, usage.CacheWriteTokens)
+	return cost
+}
+
+// liveCacheLabel is the cache result for a request that reached the upstream:
+// "miss" when the cache is enabled, "" when it is off.
+func (h *Handler) liveCacheLabel() string {
+	if h.cache != nil {
+		return "miss"
+	}
+	return ""
 }
 
 // New builds a proxy handler over the provider registry and router.
@@ -157,6 +184,12 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, clientShape prov
 				slog.String("exceeded", strings.Join(d.Exceeded, ",")),
 				slog.Bool("allowed", d.Allowed))
 			if !d.Allowed {
+				if h.metrics != nil {
+					for _, sc := range d.Exceeded {
+						h.metrics.IncLimitRejection(sc)
+					}
+				}
+				h.observe(target.Provider, target.Model, http.StatusTooManyRequests, start, provider.Usage{}, 0, h.liveCacheLabel())
 				h.writeError(w, http.StatusTooManyRequests, "rate_limit_error", "budget or rate limit exceeded: "+strings.Join(d.Exceeded, ", "))
 				return
 			}
@@ -182,6 +215,10 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, clientShape prov
 		}
 		h.log.Error("upstream request failed",
 			slog.String("request_id", reqID), slog.String("provider", prov.Name()), slog.Any("error", err))
+		if h.metrics != nil {
+			h.metrics.IncUpstreamError(prov.Name())
+		}
+		h.observe(target.Provider, target.Model, http.StatusBadGateway, start, provider.Usage{}, 0, h.liveCacheLabel())
 		h.writeError(w, http.StatusBadGateway, "upstream_error", "upstream provider request failed")
 		return
 	}
@@ -227,6 +264,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, clientShape prov
 	if h.recorder != nil {
 		h.recordAttribution(r, reqID, meta.Model, target, resp.StatusCode, usage, start, false)
 	}
+	h.observe(target.Provider, target.Model, resp.StatusCode, start, usage, h.costOf(target.Model, usage), h.liveCacheLabel())
 	if relayErr != nil {
 		h.log.Warn("response relay interrupted", slog.String("request_id", reqID), slog.Any("error", relayErr))
 	}
@@ -257,6 +295,7 @@ func (h *Handler) serveCacheHit(w http.ResponseWriter, r *http.Request, reqID, r
 	if h.recorder != nil {
 		h.recordAttribution(r, reqID, requestedModel, target, entry.Status, entry.Usage, start, true)
 	}
+	h.observe(target.Provider, target.Model, entry.Status, start, entry.Usage, 0, "hit")
 }
 
 // relayResponse writes the upstream response to the client, translating the body

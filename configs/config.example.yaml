@@ -68,3 +68,8 @@ limits:
 # this only enables short debug prompt previews in the logs.
 security:
   redact_prompts: true
+  # auth_cache_ttl bounds how long a disabled key keeps authenticating after it
+  # is revoked with `gatewayctl key disable`: it is the lifetime of a cached key
+  # lookup, and so the revocation SLA. Lower it for faster revocation at the cost
+  # of more database lookups. 0 (or omitted) uses the gateway default (5s).
+  auth_cache_ttl: 5s

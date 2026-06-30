@@ -23,6 +23,12 @@ type Lookup interface {
 
 // Authenticator authenticates requests against a key store, caching positive
 // lookups for a short TTL to keep the hot path off the database.
+//
+// The cache stores the resolved key, so a key disabled in the store keeps
+// authenticating until its cached entry expires. The TTL is therefore the
+// revocation SLA: after gatewayctl disables a key, this instance may still
+// accept it for up to ttl. Keep the TTL short, or set it to a small value via
+// config, when fast revocation matters more than database load.
 type Authenticator struct {
 	store Lookup
 	log   *slog.Logger
@@ -37,8 +43,11 @@ type cacheEntry struct {
 	expires time.Time
 }
 
-// DefaultCacheTTL is the default lifetime of a cached key lookup.
-const DefaultCacheTTL = 30 * time.Second
+// DefaultCacheTTL is the default lifetime of a cached key lookup, and so the
+// default upper bound on how long a disabled key keeps working after it is
+// revoked. Kept short to bound that revocation window; operators who need
+// stricter revocation can lower it via config.
+const DefaultCacheTTL = 5 * time.Second
 
 // New builds an Authenticator. A ttl of 0 uses DefaultCacheTTL.
 func New(s Lookup, log *slog.Logger, ttl time.Duration) *Authenticator {

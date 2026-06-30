@@ -59,6 +59,9 @@ func New(name, baseURL, apiKey string, opts ...Option) *Provider {
 // Name returns the configured provider name.
 func (p *Provider) Name() string { return p.name }
 
+// Shape reports that this provider speaks the Anthropic wire format.
+func (p *Provider) Shape() provider.Shape { return provider.ShapeAnthropic }
+
 // Complete forwards the request body to Anthropic and returns the upstream
 // response for the proxy to relay.
 func (p *Provider) Complete(ctx context.Context, req *provider.Request) (*provider.Response, error) {

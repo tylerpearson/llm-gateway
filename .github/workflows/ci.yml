@@ -38,9 +38,12 @@ jobs:
           cache: false
 
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6
+        # v8 of the action installs golangci-lint v2, which matches the v2
+        # schema in .golangci.yml. v6 caps at golangci-lint v1 and rejects the
+        # v2 config. Pin the binary version so CI matches local development.
+        uses: golangci/golangci-lint-action@v8
         with:
-          version: latest
+          version: v2.12.2
 
   govulncheck:
     name: Vulnerability Check

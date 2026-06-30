@@ -1,0 +1,31 @@
+# Prometheus scrape configuration for the llm-gateway local dev stack.
+#
+# Scrape interval: 15s for all targets.
+# Targets:
+#   - gateway: scrapes /metrics on port 8080 (Go runtime + process + custom metrics)
+#   - prometheus: self-scrape on port 9090
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  # External labels are applied to all time series for identification when
+  # federating or pushing to a remote write endpoint.
+  external_labels:
+    environment: local
+
+scrape_configs:
+  # llm-gateway application metrics.
+  # Exposes Go runtime, process, and (in later phases) custom business metrics.
+  - job_name: "gateway"
+    static_configs:
+      - targets: ["gateway:8080"]
+        labels:
+          service: llm-gateway
+    metrics_path: /metrics
+
+  # Prometheus self-scrape so its own performance is visible in Grafana.
+  - job_name: "prometheus"
+    static_configs:
+      - targets: ["localhost:9090"]
+        labels:
+          service: prometheus

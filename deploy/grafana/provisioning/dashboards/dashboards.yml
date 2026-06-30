@@ -1,0 +1,17 @@
+# Grafana dashboard provisioning for the llm-gateway local dev stack.
+#
+# This provider loads all JSON dashboard files from the specified path.
+# Drop additional .json files into that directory and restart Grafana to load them.
+
+apiVersion: 1
+
+providers:
+  - name: "llm-gateway"
+    orgId: 1
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /etc/grafana/provisioning/dashboards
+      foldersFromFilesStructure: false

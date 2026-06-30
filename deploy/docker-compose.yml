@@ -1,0 +1,174 @@
+# Local development stack for llm-gateway.
+#
+# Usage:
+#   export ANTHROPIC_API_KEY=sk-ant-...
+#   export OPENAI_API_KEY=sk-...
+#   docker compose -f deploy/docker-compose.yml up
+#
+# Provider API keys are passed from host environment variables; they are
+# intentionally not hardcoded here. Other connection strings are set to
+# dev-friendly defaults that match the services below.
+
+version: "3.9"
+
+# ---------------------------------------------------------------------------
+# Named volumes for persistent datastore state across restarts.
+# ---------------------------------------------------------------------------
+volumes:
+  mysql_data:
+  clickhouse_data:
+  redis_data:
+  prometheus_data:
+  grafana_data:
+
+# ---------------------------------------------------------------------------
+# Shared network. All services join "gateway_net".
+# ---------------------------------------------------------------------------
+networks:
+  gateway_net:
+    driver: bridge
+
+# ---------------------------------------------------------------------------
+# Services
+# ---------------------------------------------------------------------------
+services:
+
+  # --------------------------------------------------------------------------
+  # MySQL 8 -- stores virtual keys, teams, budgets, and usage records.
+  # --------------------------------------------------------------------------
+  mysql:
+    image: mysql:8
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: devroot
+      MYSQL_DATABASE: llmgateway
+      MYSQL_USER: gateway
+      MYSQL_PASSWORD: gateway
+    volumes:
+      - mysql_data:/var/lib/mysql
+    networks:
+      - gateway_net
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "--silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # --------------------------------------------------------------------------
+  # ClickHouse -- stores per-request analytics (tokens, cost, latency).
+  # --------------------------------------------------------------------------
+  clickhouse:
+    image: clickhouse/clickhouse-server:latest
+    restart: unless-stopped
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+    networks:
+      - gateway_net
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:8123/ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # --------------------------------------------------------------------------
+  # Redis 7 -- rate-limit counters and response cache.
+  # --------------------------------------------------------------------------
+  redis:
+    image: redis:7
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    networks:
+      - gateway_net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # --------------------------------------------------------------------------
+  # Gateway -- the main llm-gateway server binary.
+  # Build from the repo root Dockerfile.
+  # --------------------------------------------------------------------------
+  gateway:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      # Provider API keys: pulled from host environment; empty string fallback
+      # so the stack starts even when keys are absent (routes will error).
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+      GLM_API_KEY: "${GLM_API_KEY:-}"
+      # Datastore connection strings pointing at the companion services above.
+      MYSQL_DSN: "gateway:gateway@tcp(mysql:3306)/llmgateway?parseTime=true"
+      CLICKHOUSE_DSN: "clickhouse://clickhouse:9000/default"
+      REDIS_ADDR: "redis:6379"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - gateway_net
+    # Distroless has no shell, so we use the exec (CMD) form with the static
+    # wget binary that is copied from busybox:musl in the Dockerfile.
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:8080/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # --------------------------------------------------------------------------
+  # Prometheus -- scrapes the gateway /metrics endpoint.
+  # --------------------------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:latest
+    restart: unless-stopped
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.enable-lifecycle"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    depends_on:
+      gateway:
+        condition: service_healthy
+    networks:
+      - gateway_net
+
+  # --------------------------------------------------------------------------
+  # Grafana -- dashboards and alerting. Provisioned automatically on startup.
+  # --------------------------------------------------------------------------
+  grafana:
+    image: grafana/grafana:latest
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+    networks:
+      - gateway_net

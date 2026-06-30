@@ -18,6 +18,7 @@ import (
 
 	"github.com/tylerpearson/llm-gateway/internal/attribution"
 	"github.com/tylerpearson/llm-gateway/internal/auth"
+	"github.com/tylerpearson/llm-gateway/internal/cache"
 	"github.com/tylerpearson/llm-gateway/internal/config"
 	"github.com/tylerpearson/llm-gateway/internal/pricing"
 	"github.com/tylerpearson/llm-gateway/internal/provider"
@@ -87,6 +88,19 @@ func run(configPath string) error {
 		log.Info("request attribution enabled", slog.String("sink", "clickhouse"))
 	} else {
 		log.Warn("attribution disabled: CLICKHOUSE_DSN not configured")
+	}
+
+	// Exact-match response cache (Redis) when configured.
+	if cfg.Storage.RedisAddr != "" {
+		c, err := cache.New(cfg.Storage.RedisAddr, cache.DefaultTTL, cache.DefaultMaxBytes, log)
+		if err != nil {
+			return fmt.Errorf("open response cache: %w", err)
+		}
+		defer func() { _ = c.Close() }()
+		proxyOpts = append(proxyOpts, proxy.WithCache(c))
+		log.Info("response cache enabled", slog.String("sink", "redis"))
+	} else {
+		log.Warn("response cache disabled: REDIS_ADDR not configured")
 	}
 
 	providers := buildProviders(cfg.Providers, log)

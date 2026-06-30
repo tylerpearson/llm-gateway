@@ -93,6 +93,15 @@ jobs:
           --health-interval=10s
           --health-timeout=5s
           --health-retries=15
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd="redis-cli ping"
+          --health-interval=10s
+          --health-timeout=3s
+          --health-retries=15
     steps:
       - uses: actions/checkout@v4
 
@@ -105,4 +114,5 @@ jobs:
         env:
           MYSQL_DSN: "root:rootpw@tcp(127.0.0.1:3306)/llmgateway?parseTime=true"
           CLICKHOUSE_DSN: "clickhouse://default:chpw@127.0.0.1:9000/default"
+          REDIS_ADDR: "127.0.0.1:6379"
         run: go test -tags=integration -race ./...

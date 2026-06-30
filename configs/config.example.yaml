@@ -48,3 +48,17 @@ storage:
   mysql_dsn_env: MYSQL_DSN
   clickhouse_dsn_env: CLICKHOUSE_DSN
   redis_addr_env: REDIS_ADDR
+
+# Budgets and rate limits, tracked per key and per team in Redis. A value of 0
+# means unlimited. mode soft allows the request and reports the breach on the
+# x-llm-limit response header; mode hard rejects breaching requests with 429.
+limits:
+  mode: soft
+  per_key:
+    requests_per_min: 0
+    tokens_per_min: 0
+    monthly_usd: 0
+  per_team:
+    requests_per_min: 0
+    tokens_per_min: 0
+    monthly_usd: 0

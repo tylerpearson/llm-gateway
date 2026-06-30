@@ -25,6 +25,7 @@ import (
 	"github.com/tylerpearson/llm-gateway/internal/provider/anthropic"
 	"github.com/tylerpearson/llm-gateway/internal/provider/openai"
 	"github.com/tylerpearson/llm-gateway/internal/proxy"
+	"github.com/tylerpearson/llm-gateway/internal/ratelimit"
 	"github.com/tylerpearson/llm-gateway/internal/router"
 	"github.com/tylerpearson/llm-gateway/internal/server"
 	"github.com/tylerpearson/llm-gateway/internal/store/clickhouse"
@@ -99,8 +100,16 @@ func run(configPath string) error {
 		defer func() { _ = c.Close() }()
 		proxyOpts = append(proxyOpts, proxy.WithCache(c))
 		log.Info("response cache enabled", slog.String("sink", "redis"))
+
+		lim, err := ratelimit.New(cfg.Storage.RedisAddr, limitSettings(cfg.Limits), log)
+		if err != nil {
+			return fmt.Errorf("open rate limiter: %w", err)
+		}
+		defer func() { _ = lim.Close() }()
+		proxyOpts = append(proxyOpts, proxy.WithRateLimit(lim))
+		log.Info("rate limiting enabled", slog.String("mode", cfg.Limits.Mode))
 	} else {
-		log.Warn("response cache disabled: REDIS_ADDR not configured")
+		log.Warn("response cache and rate limiting disabled: REDIS_ADDR not configured")
 	}
 
 	providers := buildProviders(cfg.Providers, log)
@@ -168,6 +177,22 @@ func buildProviders(pcs map[string]config.Provider, log *slog.Logger) provider.R
 		}
 	}
 	return reg
+}
+
+// limitSettings maps config limits to the ratelimit package settings.
+func limitSettings(c config.Limits) ratelimit.Settings {
+	conv := func(s config.LimitSet) ratelimit.Limits {
+		return ratelimit.Limits{
+			RequestsPerMin: s.RequestsPerMin,
+			TokensPerMin:   s.TokensPerMin,
+			MonthlyUSD:     s.MonthlyUSD,
+		}
+	}
+	return ratelimit.Settings{
+		Mode:    ratelimit.Mode(c.Mode),
+		PerKey:  conv(c.PerKey),
+		PerTeam: conv(c.PerTeam),
+	}
 }
 
 func newLogger(cfg config.Logging) *slog.Logger {

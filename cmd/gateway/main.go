@@ -5,7 +5,9 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"sort"
@@ -15,11 +17,13 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 
+	"github.com/tylerpearson/llm-gateway/internal/auth"
 	"github.com/tylerpearson/llm-gateway/internal/config"
 	"github.com/tylerpearson/llm-gateway/internal/provider"
 	"github.com/tylerpearson/llm-gateway/internal/provider/anthropic"
 	"github.com/tylerpearson/llm-gateway/internal/proxy"
 	"github.com/tylerpearson/llm-gateway/internal/server"
+	"github.com/tylerpearson/llm-gateway/internal/store/mysql"
 )
 
 func main() {
@@ -47,13 +51,34 @@ func run(configPath string) error {
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 	)
 
+	// Virtual key auth is enabled when a config store is configured. Without
+	// one the gateway runs unauthenticated, which is acceptable only for local
+	// development, so the absence is logged loudly.
+	var authMW func(http.Handler) http.Handler
+	if cfg.Storage.MySQLDSN != "" {
+		st, err := mysql.Open(cfg.Storage.MySQLDSN)
+		if err != nil {
+			return fmt.Errorf("open config store: %w", err)
+		}
+		defer func() { _ = st.Close() }()
+		authMW = auth.New(st, log, 0).Middleware
+		log.Info("virtual key auth enabled")
+	} else {
+		log.Warn("AUTH DISABLED: MYSQL_DSN not configured, /v1/messages is unauthenticated (development only)")
+	}
+
 	providers := buildProviders(cfg.Providers, log)
 
 	var routeFns []func(chi.Router)
 	if msgProvider := selectMessagesProvider(cfg, providers); msgProvider != nil {
 		h := proxy.New(msgProvider, log)
 		routeFns = append(routeFns, func(r chi.Router) {
-			r.Post("/v1/messages", h.Messages)
+			r.Group(func(gr chi.Router) {
+				if authMW != nil {
+					gr.Use(authMW)
+				}
+				gr.Post("/v1/messages", h.Messages)
+			})
 		})
 		log.Info("mounted /v1/messages", slog.String("provider", msgProvider.Name()))
 	} else {

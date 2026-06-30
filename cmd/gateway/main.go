@@ -17,12 +17,15 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 
+	"github.com/tylerpearson/llm-gateway/internal/attribution"
 	"github.com/tylerpearson/llm-gateway/internal/auth"
 	"github.com/tylerpearson/llm-gateway/internal/config"
+	"github.com/tylerpearson/llm-gateway/internal/pricing"
 	"github.com/tylerpearson/llm-gateway/internal/provider"
 	"github.com/tylerpearson/llm-gateway/internal/provider/anthropic"
 	"github.com/tylerpearson/llm-gateway/internal/proxy"
 	"github.com/tylerpearson/llm-gateway/internal/server"
+	"github.com/tylerpearson/llm-gateway/internal/store/clickhouse"
 	"github.com/tylerpearson/llm-gateway/internal/store/mysql"
 )
 
@@ -67,11 +70,29 @@ func run(configPath string) error {
 		log.Warn("AUTH DISABLED: MYSQL_DSN not configured, /v1/messages is unauthenticated (development only)")
 	}
 
+	// Cost attribution writes one row per request to ClickHouse when configured.
+	var proxyOpts []proxy.Option
+	if cfg.Storage.ClickHouseDSN != "" {
+		ch, err := clickhouse.Open(cfg.Storage.ClickHouseDSN)
+		if err != nil {
+			return fmt.Errorf("open analytics store: %w", err)
+		}
+		writer := attribution.NewWriter(ch, log, attribution.Options{})
+		defer func() {
+			writer.Close()
+			_ = ch.Close()
+		}()
+		proxyOpts = append(proxyOpts, proxy.WithAttribution(writer, pricing.DefaultTable()))
+		log.Info("request attribution enabled", slog.String("sink", "clickhouse"))
+	} else {
+		log.Warn("attribution disabled: CLICKHOUSE_DSN not configured")
+	}
+
 	providers := buildProviders(cfg.Providers, log)
 
 	var routeFns []func(chi.Router)
 	if msgProvider := selectMessagesProvider(cfg, providers); msgProvider != nil {
-		h := proxy.New(msgProvider, log)
+		h := proxy.New(msgProvider, log, proxyOpts...)
 		routeFns = append(routeFns, func(r chi.Router) {
 			r.Group(func(gr chi.Router) {
 				if authMW != nil {

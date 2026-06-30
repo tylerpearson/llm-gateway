@@ -9,3 +9,11 @@ import "embed"
 //
 //go:embed mysql/*.sql
 var MySQL embed.FS
+
+// ClickHouse holds the ClickHouse migration files under the clickhouse/
+// subdirectory. ClickHouse DDL is applied directly (CREATE TABLE IF NOT EXISTS
+// is idempotent) rather than through golang-migrate.
+//
+//go:embed clickhouse/*.sql
+var ClickHouse embed.FS
+

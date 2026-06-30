@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/tylerpearson/llm-gateway/internal/auth"
+	"github.com/tylerpearson/llm-gateway/internal/store/clickhouse"
 	"github.com/tylerpearson/llm-gateway/internal/store/mysql"
 )
 
@@ -81,6 +82,7 @@ func ctx() (context.Context, context.CancelFunc) {
 func cmdMigrate(args []string) error {
 	fs := flag.NewFlagSet("migrate", flag.ExitOnError)
 	dsn := fs.String("dsn", "", "MySQL DSN (defaults to MYSQL_DSN env)")
+	chDSN := fs.String("clickhouse-dsn", "", "ClickHouse DSN (defaults to CLICKHOUSE_DSN env)")
 	_ = fs.Parse(args)
 
 	resolved, err := dsnFromEnv(*dsn)
@@ -90,7 +92,19 @@ func cmdMigrate(args []string) error {
 	if err := mysql.Migrate(resolved); err != nil {
 		return err
 	}
-	fmt.Println("migrations applied")
+	fmt.Println("mysql migrations applied")
+
+	// ClickHouse is optional; migrate it when a DSN is configured.
+	ch := *chDSN
+	if ch == "" {
+		ch = os.Getenv("CLICKHOUSE_DSN")
+	}
+	if ch != "" {
+		if err := clickhouse.Migrate(ch); err != nil {
+			return fmt.Errorf("clickhouse: %w", err)
+		}
+		fmt.Println("clickhouse migrations applied")
+	}
 	return nil
 }
 

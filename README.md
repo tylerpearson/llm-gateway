@@ -28,7 +28,7 @@ The middleware chain handles: request ID and recovery, virtual key auth (MySQL-b
 
 **Under active construction.** The project is built in phased increments where each phase leaves a working, testable gateway.
 
-**What currently exists (P0 through P8):**
+**v1 is feature-complete (P0 through P9).** What exists:
 
 - YAML config loader with env-var secret injection
 - HTTP server (`/healthz`, `/readyz`, `/metrics`) with graceful shutdown
@@ -42,12 +42,9 @@ The middleware chain handles: request ID and recovery, virtual key auth (MySQL-b
 - **P6**: per-key and per-team budgets and rate limits (requests/min, tokens/min, monthly USD) with soft and hard modes
 - **P7**: Prometheus metrics and four provisioned Grafana dashboards (spend, FinOps, latency, cache)
 - **P8**: prompt redaction (on by default), audit logging of admin changes, and a Helm chart in `charts/llm-gateway`
+- **P9**: v2 eval seams: the `MirrorHook` interface (invoked post-routing, no-op in v1) and the ClickHouse `eval_runs` / `eval_results` schema
 
-**Upcoming phases:**
-
-| Phase | Description |
-|-------|-------------|
-| P9 | v2 seams: eval `MirrorHook` interface and ClickHouse eval schema (no-op placeholders) |
+Still a WIP/test project: tests use a mock provider by default, so a true end-to-end run against Anthropic, OpenAI, or GLM requires a real provider API key.
 
 ## Quickstart (local dev)
 

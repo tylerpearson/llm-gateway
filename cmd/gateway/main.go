@@ -20,6 +20,7 @@ import (
 	"github.com/tylerpearson/llm-gateway/internal/auth"
 	"github.com/tylerpearson/llm-gateway/internal/cache"
 	"github.com/tylerpearson/llm-gateway/internal/config"
+	"github.com/tylerpearson/llm-gateway/internal/eval"
 	"github.com/tylerpearson/llm-gateway/internal/metrics"
 	"github.com/tylerpearson/llm-gateway/internal/pricing"
 	"github.com/tylerpearson/llm-gateway/internal/provider"
@@ -60,6 +61,9 @@ func run(configPath string) error {
 	proxyOpts := []proxy.Option{
 		proxy.WithMetrics(metrics.New(reg)),
 		proxy.WithPromptRedaction(cfg.RedactPrompts()),
+		// v2 eval seam: a no-op mirror hook is installed so the post-routing
+		// invocation point exists. Real shadow evaluation lands in v2.
+		proxy.WithMirrorHook(eval.NopHook{}),
 	}
 	if !cfg.RedactPrompts() {
 		log.Warn("prompt redaction disabled: request prompts will be logged at debug level")

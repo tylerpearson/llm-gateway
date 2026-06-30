@@ -20,6 +20,23 @@ type Config struct {
 	Providers map[string]Provider `yaml:"providers"`
 	Routing   Routing             `yaml:"routing"`
 	Storage   Storage             `yaml:"storage"`
+	Limits    Limits              `yaml:"limits"`
+}
+
+// Limits configures per key and per team budgets and rate limits. A limit of 0
+// means unlimited. Mode selects soft enforcement (allow and flag) or hard
+// enforcement (reject with 429).
+type Limits struct {
+	Mode    string   `yaml:"mode"`
+	PerKey  LimitSet `yaml:"per_key"`
+	PerTeam LimitSet `yaml:"per_team"`
+}
+
+// LimitSet is one identity's thresholds.
+type LimitSet struct {
+	RequestsPerMin int64   `yaml:"requests_per_min"`
+	TokensPerMin   int64   `yaml:"tokens_per_min"`
+	MonthlyUSD     float64 `yaml:"monthly_usd"`
 }
 
 // Server holds HTTP listener settings.
@@ -120,6 +137,9 @@ func (c *Config) applyDefaults() {
 	if c.Logging.Format == "" {
 		c.Logging.Format = defaultLogFormat
 	}
+	if c.Limits.Mode == "" {
+		c.Limits.Mode = "soft"
+	}
 }
 
 // applyEnv resolves secrets and connection strings from the environment so they
@@ -152,6 +172,11 @@ func (c *Config) validate() error {
 	case "json", "text":
 	default:
 		return fmt.Errorf("invalid logging.format %q", c.Logging.Format)
+	}
+	switch c.Limits.Mode {
+	case "soft", "hard":
+	default:
+		return fmt.Errorf("invalid limits.mode %q", c.Limits.Mode)
 	}
 	// Routing is optional during early phases, but if a default alias is named
 	// it must resolve to a defined alias that names a defined provider.

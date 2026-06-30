@@ -13,6 +13,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5/middleware"
@@ -23,6 +24,7 @@ import (
 	"github.com/tylerpearson/llm-gateway/internal/pricing"
 	"github.com/tylerpearson/llm-gateway/internal/provider"
 	"github.com/tylerpearson/llm-gateway/internal/provider/translate"
+	"github.com/tylerpearson/llm-gateway/internal/ratelimit"
 	"github.com/tylerpearson/llm-gateway/internal/router"
 )
 
@@ -32,6 +34,12 @@ type ResponseCache interface {
 	Get(ctx context.Context, key string) (*cache.Entry, bool)
 	Set(ctx context.Context, key string, e *cache.Entry)
 	MaxBytes() int
+}
+
+// RateLimiter enforces budgets and rate limits. ratelimit.Limiter satisfies it.
+type RateLimiter interface {
+	Check(ctx context.Context, id ratelimit.Identity) ratelimit.Decision
+	RecordUsage(ctx context.Context, id ratelimit.Identity, tokens int, costUSD float64)
 }
 
 // maxRequestBytes bounds the inbound body size. Long context requests are large
@@ -47,6 +55,7 @@ type Handler struct {
 	pricing  pricing.Table
 	recorder attribution.Recorder
 	cache    ResponseCache
+	limiter  RateLimiter
 }
 
 // Option customizes a Handler.
@@ -64,6 +73,11 @@ func WithAttribution(rec attribution.Recorder, table pricing.Table) Option {
 // WithCache enables the exact-match response cache.
 func WithCache(c ResponseCache) Option {
 	return func(h *Handler) { h.cache = c }
+}
+
+// WithRateLimit enables budget and rate limit enforcement.
+func WithRateLimit(l RateLimiter) Option {
+	return func(h *Handler) { h.limiter = l }
 }
 
 // New builds a proxy handler over the provider registry and router.
@@ -104,8 +118,10 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, clientShape prov
 	}
 
 	keyDefault := ""
+	var ident ratelimit.Identity
 	if p, ok := auth.FromContext(r.Context()); ok {
 		keyDefault = p.DefaultAlias
+		ident = ratelimit.Identity{KeyID: p.KeyID, TeamID: p.TeamID}
 	}
 	target, err := h.router.Resolve(meta.Model, r.Header.Get("x-llm-tier"), keyDefault)
 	if err != nil {
@@ -127,6 +143,23 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, clientShape prov
 		if entry, ok := h.cache.Get(r.Context(), cacheKey); ok {
 			h.serveCacheHit(w, r, reqID, meta.Model, meta.Stream, target, entry, start)
 			return
+		}
+	}
+
+	// Budget and rate limit enforcement. A breach is reported on x-llm-limit;
+	// in hard mode it rejects the request with 429.
+	if h.limiter != nil && (ident.KeyID != "" || ident.TeamID != "") {
+		d := h.limiter.Check(r.Context(), ident)
+		if len(d.Exceeded) > 0 {
+			w.Header().Set("x-llm-limit", strings.Join(d.Exceeded, ","))
+			h.log.Warn("limit exceeded",
+				slog.String("request_id", reqID),
+				slog.String("exceeded", strings.Join(d.Exceeded, ",")),
+				slog.Bool("allowed", d.Allowed))
+			if !d.Allowed {
+				h.writeError(w, http.StatusTooManyRequests, "rate_limit_error", "budget or rate limit exceeded: "+strings.Join(d.Exceeded, ", "))
+				return
+			}
 		}
 	}
 
@@ -168,6 +201,13 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, clientShape prov
 			Body:        capture.Bytes(),
 			Usage:       usage,
 		})
+	}
+
+	// Feed the request's tokens and cost into the limiter counters so later
+	// requests see updated usage.
+	if h.limiter != nil && (ident.KeyID != "" || ident.TeamID != "") && resp.StatusCode < 400 {
+		cost, _ := h.pricing.Cost(target.Model, usage.InputTokens, usage.OutputTokens, usage.CacheReadTokens, usage.CacheWriteTokens)
+		h.limiter.RecordUsage(r.Context(), ident, usage.InputTokens+usage.OutputTokens, cost)
 	}
 
 	h.log.Info("proxy request",

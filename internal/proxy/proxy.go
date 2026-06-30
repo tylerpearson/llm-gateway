@@ -14,6 +14,9 @@ import (
 
 	"github.com/go-chi/chi/v5/middleware"
 
+	"github.com/tylerpearson/llm-gateway/internal/attribution"
+	"github.com/tylerpearson/llm-gateway/internal/auth"
+	"github.com/tylerpearson/llm-gateway/internal/pricing"
 	"github.com/tylerpearson/llm-gateway/internal/provider"
 )
 
@@ -25,11 +28,29 @@ const maxRequestBytes = 32 << 20 // 32 MiB
 type Handler struct {
 	provider provider.Provider
 	log      *slog.Logger
+	pricing  pricing.Table
+	recorder attribution.Recorder
+}
+
+// Option customizes a Handler.
+type Option func(*Handler)
+
+// WithAttribution enables cost attribution: each request's cost is computed
+// from table and recorded via rec (asynchronously).
+func WithAttribution(rec attribution.Recorder, table pricing.Table) Option {
+	return func(h *Handler) {
+		h.recorder = rec
+		h.pricing = table
+	}
 }
 
 // New builds a proxy handler bound to the given upstream provider.
-func New(p provider.Provider, log *slog.Logger) *Handler {
-	return &Handler{provider: p, log: log}
+func New(p provider.Provider, log *slog.Logger, opts ...Option) *Handler {
+	h := &Handler{provider: p, log: log}
+	for _, opt := range opts {
+		opt(h)
+	}
+	return h
 }
 
 // hopByHop are response headers that must not be forwarded to the client.
@@ -114,12 +135,49 @@ func (h *Handler) Messages(w http.ResponseWriter, r *http.Request) {
 		slog.Int("cache_write_tokens", usage.CacheWriteTokens),
 		slog.Duration("duration", time.Since(start)),
 	)
+
+	if h.recorder != nil {
+		h.recordAttribution(r, reqID, meta.Model, resp.StatusCode, usage, start)
+	}
+
 	if relayErr != nil {
 		h.log.Warn("response relay interrupted",
 			slog.String("request_id", reqID),
 			slog.Any("error", relayErr),
 		)
 	}
+}
+
+// recordAttribution computes the request cost and enqueues an attribution
+// record. In P1 pass-through the served model equals the requested model and
+// cache_hit is always false; both change once routing (P4) and caching (P5)
+// land.
+func (h *Handler) recordAttribution(r *http.Request, reqID, model string, status int, usage provider.Usage, start time.Time) {
+	cost, _ := h.pricing.Cost(model, usage.InputTokens, usage.OutputTokens, usage.CacheReadTokens, usage.CacheWriteTokens)
+
+	var keyID, teamID string
+	if p, ok := auth.FromContext(r.Context()); ok {
+		keyID = p.KeyID
+		teamID = p.TeamID
+	}
+
+	h.recorder.Record(attribution.Record{
+		Timestamp:        start,
+		RequestID:        reqID,
+		KeyID:            keyID,
+		TeamID:           teamID,
+		RequestedModel:   model,
+		ServedModel:      model,
+		Provider:         h.provider.Name(),
+		InputTokens:      usage.InputTokens,
+		OutputTokens:     usage.OutputTokens,
+		CacheReadTokens:  usage.CacheReadTokens,
+		CacheWriteTokens: usage.CacheWriteTokens,
+		CostUSD:          cost,
+		LatencyMS:        time.Since(start).Milliseconds(),
+		CacheHit:         false,
+		Status:           status,
+	})
 }
 
 // relay copies body to the client, flushing each chunk so streamed responses

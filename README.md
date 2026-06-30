@@ -1,5 +1,10 @@
 # llm-gateway
 
+> **Work in progress / personal test project.** This is a learning and portfolio
+> build under active construction, not a finished or supported product. Only the
+> P0 scaffold currently exists (see Status below). Do not deploy it as is. The
+> public repository exists so CI can run on free Actions minutes.
+
 A production-grade multi-provider LLM gateway in Go. Every LLM call from Claude Code and other clients flows through a single proxy so cost control, request routing, response caching, and observability happen in one place rather than in each client. The gateway supports Anthropic, OpenAI, and GLM out of the box, attributes spend to teams and virtual keys, and feeds Grafana dashboards backed by Prometheus and ClickHouse.
 
 ## Architecture

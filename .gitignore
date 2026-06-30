@@ -20,3 +20,6 @@ coverage.*
 
 # Coverage output
 /coverage.out
+
+# Claude Code local state (worktrees, session scratch); not part of the project
+/.claude/

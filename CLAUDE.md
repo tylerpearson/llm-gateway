@@ -19,7 +19,7 @@ llm-gateway/
     server/                    # HTTP listener, chi router, health/metrics handlers
     middleware/                # request-id, auth, rate-limit, logging
     proxy/                     # streaming tee, response forwarding
-    provider/                  # provider interface + anthropic/, openai/, glm/, translate/
+    provider/                  # provider interface + anthropic/, openai/, translate/
     router/                    # alias and tier routing logic
     cache/                     # Redis exact-match response cache
     ratelimit/                 # Redis counters for rate limits and budgets
@@ -40,6 +40,8 @@ llm-gateway/
   go.mod  go.sum
   .github/workflows/ci.yml
 ```
+
+Note: GLM is served via the openai adapter; there is no separate glm/ package.
 
 Not all of these directories exist yet; they are added phase by phase. See `PLAN.md` for the build order.
 

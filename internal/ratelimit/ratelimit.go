@@ -3,6 +3,14 @@
 // dollar budget. The default mode is soft (allow the request and flag the
 // breach via a response header) rather than hard 429s, following the project's
 // preference for better defaults over usage caps.
+//
+// Enforcement bound: The requests-per-minute counter uses atomic Redis INCR
+// and is exact. The tokens-per-minute and monthly-USD limits are checked by
+// reading counter values that previous requests recorded. Since token and
+// dollar usage are only known after a response completes, they are added via
+// RecordUsage after the response. This means tokens-per-minute and
+// monthly-USD checks lag by roughly one request. Under high concurrency, a
+// hard monthly-USD cap can be overshot by requests in flight when checked.
 package ratelimit
 
 import (

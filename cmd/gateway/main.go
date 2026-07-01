@@ -22,6 +22,7 @@ import (
 	"github.com/tylerpearson/llm-gateway/internal/cache"
 	"github.com/tylerpearson/llm-gateway/internal/config"
 	"github.com/tylerpearson/llm-gateway/internal/eval"
+	"github.com/tylerpearson/llm-gateway/internal/guard"
 	"github.com/tylerpearson/llm-gateway/internal/metrics"
 	"github.com/tylerpearson/llm-gateway/internal/pricing"
 	"github.com/tylerpearson/llm-gateway/internal/provider"
@@ -68,6 +69,20 @@ func run(configPath string) error {
 	}
 	if !cfg.RedactPrompts() {
 		log.Warn("prompt redaction disabled: request prompts will be logged at debug level")
+	}
+
+	// Pre-call request guard. Off by default; when enabled it masks or blocks the
+	// request body before it is sent upstream.
+	if cfg.Security.Guard.Enabled {
+		var g guard.Guard
+		switch cfg.Security.Guard.Type {
+		case "", "regex_mask":
+			g = guard.NewRegexMasker()
+		default:
+			return fmt.Errorf("unknown security.guard.type %q", cfg.Security.Guard.Type)
+		}
+		proxyOpts = append(proxyOpts, proxy.WithGuard(g))
+		log.Info("request guard enabled", slog.String("type", "regex_mask"))
 	}
 
 	// Virtual key auth is enabled when a config store is configured. Without

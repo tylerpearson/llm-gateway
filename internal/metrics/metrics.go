@@ -25,6 +25,7 @@ type Metrics struct {
 	failovers       *prometheus.CounterVec
 	breakerOpen     *prometheus.GaugeVec
 	contextSkips    *prometheus.CounterVec
+	guardActions    *prometheus.CounterVec
 }
 
 // New builds and registers the collectors on reg.
@@ -74,9 +75,13 @@ func New(reg prometheus.Registerer) *Metrics {
 			Namespace: "llmgw", Name: "context_skips_total",
 			Help: "Candidate models skipped by the pre-call context-window check, by model.",
 		}, []string{"model"}),
+		guardActions: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: "llmgw", Name: "guard_actions_total",
+			Help: "Guard decisions that changed a request, by action (mask or block) and category.",
+		}, []string{"action", "category"}),
 	}
 	reg.MustRegister(m.requests, m.duration, m.tokens, m.cost, m.cacheEvents, m.limitRejections,
-		m.upstreamErrors, m.upstreamRetries, m.failovers, m.breakerOpen, m.contextSkips)
+		m.upstreamErrors, m.upstreamRetries, m.failovers, m.breakerOpen, m.contextSkips, m.guardActions)
 	return m
 }
 
@@ -126,6 +131,12 @@ func (m *Metrics) IncFailover(from, to string) {
 // IncContextSkip counts a candidate model skipped by the context-window check.
 func (m *Metrics) IncContextSkip(model string) {
 	m.contextSkips.WithLabelValues(model).Inc()
+}
+
+// IncGuardAction counts a guard decision that changed a request. action is
+// "mask" or "block".
+func (m *Metrics) IncGuardAction(action, category string) {
+	m.guardActions.WithLabelValues(action, category).Inc()
 }
 
 // SetBreakerOpen records whether the breaker for a target is open.

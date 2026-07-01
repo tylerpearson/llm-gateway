@@ -147,6 +147,12 @@ routing:
       fallbacks:
         - provider: anthropic
 `},
+		{"invalid guard type", `
+security:
+  guard:
+    enabled: true
+    type: nonsense
+`},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -298,6 +304,25 @@ routing:
 			t.Errorf("retryable_status = %v, want [503]", res.RetryableStatus)
 		}
 	})
+}
+
+func TestGuardConfig(t *testing.T) {
+	cfg, err := Load(writeConfig(t, `
+security:
+  guard:
+    enabled: true
+    type: regex_mask
+`))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.Security.Guard.Enabled || cfg.Security.Guard.Type != "regex_mask" {
+		t.Errorf("guard = %+v, want enabled regex_mask", cfg.Security.Guard)
+	}
+	// An enabled guard with no type is accepted (defaults to regex_mask at wiring).
+	if _, err := Load(writeConfig(t, "security:\n  guard:\n    enabled: true\n")); err != nil {
+		t.Errorf("guard enabled with empty type should load, got %v", err)
+	}
 }
 
 func TestLoadMissingFile(t *testing.T) {

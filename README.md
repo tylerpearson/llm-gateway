@@ -186,6 +186,19 @@ When the primary target fails with a retryable status (or a transport error), th
 
 With `routing.resilience.context_check.enabled: true`, the gateway estimates a request's token size and skips any candidate model whose context window cannot fit it, failing over to a larger-context model in the chain. When no candidate fits, the request is rejected with 413 before any upstream call rather than sent to fail. The estimate is conservative: without a bundled tokenizer it approximates from the request's character count (`chars_per_token`, default 4), inflates by `safety_margin` (default 0.15), and adds the requested `max_tokens`. It is a guard, not an exact token count. Per-model context windows live in the pricing table; unknown models fail open (the check is skipped). Skips are counted by `llmgw_context_skips_total{model}`.
 
+### Request guardrails
+
+`security.guard` installs a pre-call guard that acts on the request body actually sent upstream, distinct from `redact_prompts` (which only affects logs). A guard can **mask** the body or **block** the request:
+
+```yaml
+security:
+  guard:
+    enabled: true
+    type: regex_mask
+```
+
+The built-in `regex_mask` guard is a reference implementation that redacts emails, secret API keys (`sk-`, `AKIA...`), credit-card numbers, and US Social Security numbers, replacing each match with `[REDACTED]` before the request is hashed for caching and sent upstream. A blocked request returns 403 and is never sent upstream or cached. The guard runs after rate-limit checks and before the cache lookup, so a masked body caches consistently and a blocked request neither serves nor stores a cache entry. Actions are counted by `llmgw_guard_actions_total{action,category}`. The seam (`internal/guard`) is the extension point for real PII, secret, or prompt-injection detectors; response/output guarding is out of scope in v1 because it conflicts with streaming.
+
 ## Deployment
 
 A Helm chart lives in `charts/llm-gateway` (Deployment, Service, Ingress, HPA, ConfigMap, Secret, ServiceAccount). Provider keys and DSNs are injected from a Kubernetes Secret; the gateway config is rendered into a ConfigMap. Run `helm lint charts/llm-gateway` and `helm template charts/llm-gateway` to validate before installing.

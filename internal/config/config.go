@@ -33,6 +33,19 @@ type Config struct {
 type Security struct {
 	RedactPrompts *bool         `yaml:"redact_prompts"`
 	AuthCacheTTL  time.Duration `yaml:"auth_cache_ttl"`
+	Guard         Guard         `yaml:"guard"`
+}
+
+// Guard configures the pre-call request guardrail. When enabled, the named guard
+// inspects each request before it is sent upstream and may mask its body or
+// block it. Unlike RedactPrompts (which only affects logs), a guard acts on the
+// request actually sent to the provider.
+type Guard struct {
+	// Enabled turns request guarding on.
+	Enabled bool `yaml:"enabled"`
+	// Type selects the guard implementation. Currently only "regex_mask" (a
+	// built-in regex PII and secret masker) is supported.
+	Type string `yaml:"type"`
 }
 
 // Limits configures per key and per team budgets and rate limits. A limit of 0
@@ -354,6 +367,13 @@ func (c *Config) validate() error {
 	}
 	if c.Routing.Resilience.CooldownThreshold < 0 {
 		return fmt.Errorf("routing.resilience.cooldown_threshold must not be negative")
+	}
+	if c.Security.Guard.Enabled {
+		switch c.Security.Guard.Type {
+		case "", "regex_mask":
+		default:
+			return fmt.Errorf("invalid security.guard.type %q", c.Security.Guard.Type)
+		}
 	}
 	return nil
 }

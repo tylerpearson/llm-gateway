@@ -23,6 +23,7 @@ import (
 	"github.com/tylerpearson/llm-gateway/internal/auth"
 	"github.com/tylerpearson/llm-gateway/internal/cache"
 	"github.com/tylerpearson/llm-gateway/internal/eval"
+	"github.com/tylerpearson/llm-gateway/internal/guard"
 	"github.com/tylerpearson/llm-gateway/internal/metrics"
 	"github.com/tylerpearson/llm-gateway/internal/pricing"
 	"github.com/tylerpearson/llm-gateway/internal/provider"
@@ -65,6 +66,7 @@ type Handler struct {
 	breaker       Breaker
 	policy        ResiliencePolicy
 	ctxCheck      contextCheck
+	guard         guard.Guard
 }
 
 // Option customizes a Handler.
@@ -155,11 +157,22 @@ func WithContextCheck(table pricing.Table, charsPerToken int, safetyMargin float
 	}
 }
 
+// WithGuard installs a pre-call request guard. The guard inspects each request
+// before it is sent upstream and may mask the body or block the request. The
+// default is guard.NopGuard (allow everything).
+func WithGuard(g guard.Guard) Option {
+	return func(h *Handler) {
+		if g != nil {
+			h.guard = g
+		}
+	}
+}
+
 // New builds a proxy handler over the provider registry and router. Prompt
 // redaction is on by default; failover is off (single attempt) until
-// WithFailover is supplied.
+// WithFailover is supplied; the guard defaults to a no-op.
 func New(registry provider.Registry, rtr *router.Router, log *slog.Logger, opts ...Option) *Handler {
-	h := &Handler{registry: registry, router: rtr, log: log, redactPrompts: true, breaker: NoopBreaker{}}
+	h := &Handler{registry: registry, router: rtr, log: log, redactPrompts: true, breaker: NoopBreaker{}, guard: guard.NopGuard{}}
 	for _, opt := range opts {
 		opt(h)
 	}
@@ -238,6 +251,41 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, clientShape prov
 				h.observe(primary.Provider, primary.Model, http.StatusTooManyRequests, start, provider.Usage{}, 0, h.liveCacheLabel())
 				h.writeError(w, http.StatusTooManyRequests, "rate_limit_error", "budget or rate limit exceeded: "+strings.Join(d.Exceeded, ", "))
 				return
+			}
+		}
+	}
+
+	// Pre-call guard. It runs before the cache key is computed so a masked body
+	// caches under the same key as identical masked inputs, and a blocked request
+	// never serves or stores a cache entry. On Mask the body is rewritten before
+	// it is hashed, cached, and sent upstream.
+	if d := h.guard.Inspect(r.Context(), guard.Request{
+		RequestID: reqID,
+		KeyID:     ident.KeyID,
+		TeamID:    ident.TeamID,
+		Provider:  primary.Provider,
+		Model:     primary.Model,
+		Body:      body,
+	}); d.Action != guard.Allow {
+		switch d.Action {
+		case guard.Block:
+			if h.metrics != nil {
+				h.metrics.IncGuardAction("block", d.Category)
+			}
+			h.log.Warn("request blocked by guard",
+				slog.String("request_id", reqID), slog.String("category", d.Category))
+			h.observe(primary.Provider, primary.Model, http.StatusForbidden, start, provider.Usage{}, 0, h.liveCacheLabel())
+			h.writeError(w, http.StatusForbidden, "permission_error", guardMessage(d))
+			return
+		case guard.Mask:
+			if len(d.Rewrite) > 0 {
+				body = d.Rewrite
+				// Re-read the routing-relevant fields in case masking touched
+				// them (it should not, but the body is now authoritative).
+				_ = json.Unmarshal(body, &meta)
+			}
+			if h.metrics != nil {
+				h.metrics.IncGuardAction("mask", d.Category)
 			}
 		}
 	}
@@ -669,6 +717,16 @@ func (h *Handler) recordAttribution(r *http.Request, reqID, requestedModel strin
 		CacheHit:         cacheHit,
 		Status:           status,
 	})
+}
+
+// guardMessage builds the client-facing message for a blocked request, falling
+// back to a generic reason when the guard did not supply one so no internal
+// detail leaks by accident.
+func guardMessage(d guard.Decision) string {
+	if d.Reason != "" {
+		return d.Reason
+	}
+	return "request blocked by policy"
 }
 
 func (h *Handler) writeError(w http.ResponseWriter, status int, errType, msg string) {

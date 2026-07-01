@@ -108,3 +108,10 @@ security:
   # lookup, and so the revocation SLA. Lower it for faster revocation at the cost
   # of more database lookups. 0 (or omitted) uses the gateway default (5s).
   auth_cache_ttl: 5s
+  # Pre-call request guard. Unlike redact_prompts (logs only), a guard acts on
+  # the request actually sent upstream: it can mask the body or block the
+  # request. Off by default. type regex_mask is a built-in reference masker for
+  # emails, secret keys, credit-card and US Social Security numbers.
+  # guard:
+  #   enabled: false
+  #   type: regex_mask

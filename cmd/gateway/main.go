@@ -33,6 +33,7 @@ import (
 	"github.com/tylerpearson/llm-gateway/internal/router"
 	"github.com/tylerpearson/llm-gateway/internal/server"
 	"github.com/tylerpearson/llm-gateway/internal/store/clickhouse"
+	"github.com/tylerpearson/llm-gateway/internal/store/kafka"
 	"github.com/tylerpearson/llm-gateway/internal/store/mysql"
 )
 
@@ -108,21 +109,41 @@ func run(configPath string) error {
 		log.Warn("AUTH DISABLED: MYSQL_DSN not configured, /v1/messages is unauthenticated (development only)")
 	}
 
-	// Cost attribution writes one row per request to ClickHouse when configured.
+	// Cost attribution writes one row per request to a sink off the request hot
+	// path. ClickHouse serves direct budget and dashboard queries; Kafka streams
+	// the same records into an existing logging pipeline. Either or both may be
+	// configured, and a MultiSink fans out to whichever are present.
+	var sinks []attribution.Sink
+	var sinkNames []string
 	if cfg.Storage.ClickHouseDSN != "" {
 		ch, err := clickhouse.Open(cfg.Storage.ClickHouseDSN)
 		if err != nil {
 			return fmt.Errorf("open analytics store: %w", err)
 		}
-		writer := attribution.NewWriter(ch, log, attribution.Options{})
-		defer func() {
-			writer.Close()
-			_ = ch.Close()
-		}()
+		defer func() { _ = ch.Close() }()
+		sinks = append(sinks, ch)
+		sinkNames = append(sinkNames, "clickhouse")
+	}
+	if len(cfg.Storage.KafkaBrokers) > 0 {
+		kw, err := kafka.Open(cfg.Storage.KafkaBrokers, cfg.Storage.KafkaTopic)
+		if err != nil {
+			return fmt.Errorf("open kafka sink: %w", err)
+		}
+		defer func() { _ = kw.Close() }()
+		sinks = append(sinks, kw)
+		sinkNames = append(sinkNames, "kafka")
+	}
+	if len(sinks) > 0 {
+		var sink attribution.Sink = attribution.NewMultiSink(sinks...)
+		if len(sinks) == 1 {
+			sink = sinks[0]
+		}
+		writer := attribution.NewWriter(sink, log, attribution.Options{})
+		defer writer.Close()
 		proxyOpts = append(proxyOpts, proxy.WithAttribution(writer, pricing.DefaultTable()))
-		log.Info("request attribution enabled", slog.String("sink", "clickhouse"))
+		log.Info("request attribution enabled", slog.Any("sinks", sinkNames))
 	} else {
-		log.Warn("attribution disabled: CLICKHOUSE_DSN not configured")
+		log.Warn("attribution disabled: no CLICKHOUSE_DSN or Kafka brokers configured")
 	}
 
 	// Exact-match response cache (Redis) when configured.

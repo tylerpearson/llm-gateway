@@ -10,6 +10,7 @@ require (
 	github.com/golang-migrate/migrate/v4 v4.19.1
 	github.com/prometheus/client_golang v1.23.2
 	github.com/redis/go-redis/v9 v9.21.0
+	github.com/segmentio/kafka-go v0.4.51
 	gopkg.in/yaml.v3 v3.0.1
 )
 

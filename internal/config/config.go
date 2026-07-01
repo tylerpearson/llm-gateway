@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -176,6 +177,14 @@ type Storage struct {
 	ClickHouseDSN    string `yaml:"-"`
 	RedisAddrEnv     string `yaml:"redis_addr_env"`
 	RedisAddr        string `yaml:"-"`
+
+	// Kafka is an optional attribution sink. When KafkaBrokers resolves to a
+	// non-empty list, request logs are streamed to KafkaTopic, in addition to
+	// ClickHouse when that is also configured. Brokers are a comma-separated
+	// host:port list read from the named environment variable.
+	KafkaBrokersEnv string   `yaml:"kafka_brokers_env"`
+	KafkaBrokers    []string `yaml:"-"`
+	KafkaTopic      string   `yaml:"kafka_topic"`
 }
 
 // Default values applied when the file omits a field.
@@ -328,6 +337,25 @@ func (c *Config) applyEnv() {
 	if c.Storage.RedisAddrEnv != "" {
 		c.Storage.RedisAddr = os.Getenv(c.Storage.RedisAddrEnv)
 	}
+	if c.Storage.KafkaBrokersEnv != "" {
+		c.Storage.KafkaBrokers = splitBrokers(os.Getenv(c.Storage.KafkaBrokersEnv))
+	}
+}
+
+// splitBrokers parses a comma-separated broker list, trimming whitespace and
+// dropping empty entries so a trailing comma or spaces do not create blanks.
+func splitBrokers(s string) []string {
+	parts := strings.Split(s, ",")
+	brokers := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			brokers = append(brokers, p)
+		}
+	}
+	if len(brokers) == 0 {
+		return nil
+	}
+	return brokers
 }
 
 func (c *Config) validate() error {

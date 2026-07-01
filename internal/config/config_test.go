@@ -330,3 +330,33 @@ func TestLoadMissingFile(t *testing.T) {
 		t.Fatal("expected error for missing file, got nil")
 	}
 }
+
+func TestKafkaBrokersFromEnv(t *testing.T) {
+	t.Setenv("KAFKA_BROKERS", " b1:9092, b2:9092 ,, b3:9092 ")
+	cfg, err := Load(writeConfig(t, "storage:\n  kafka_brokers_env: KAFKA_BROKERS\n  kafka_topic: logs\n"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want := []string{"b1:9092", "b2:9092", "b3:9092"}
+	if len(cfg.Storage.KafkaBrokers) != len(want) {
+		t.Fatalf("brokers = %v, want %v", cfg.Storage.KafkaBrokers, want)
+	}
+	for i, b := range want {
+		if cfg.Storage.KafkaBrokers[i] != b {
+			t.Errorf("broker %d = %q, want %q", i, cfg.Storage.KafkaBrokers[i], b)
+		}
+	}
+	if cfg.Storage.KafkaTopic != "logs" {
+		t.Errorf("topic = %q, want logs", cfg.Storage.KafkaTopic)
+	}
+}
+
+func TestKafkaBrokersUnsetIsNil(t *testing.T) {
+	cfg, err := Load(writeConfig(t, "logging:\n  level: info\n"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Storage.KafkaBrokers != nil {
+		t.Errorf("brokers = %v, want nil when unconfigured", cfg.Storage.KafkaBrokers)
+	}
+}

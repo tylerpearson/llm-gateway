@@ -83,6 +83,12 @@ storage:
   mysql_dsn_env: MYSQL_DSN
   clickhouse_dsn_env: CLICKHOUSE_DSN
   redis_addr_env: REDIS_ADDR
+  # Optional Kafka attribution sink. Set kafka_brokers_env to the name of an
+  # environment variable holding a comma-separated host:port broker list to
+  # stream request logs into an existing pipeline. Records go to ClickHouse and
+  # Kafka when both are configured; either one alone is fine.
+  # kafka_brokers_env: KAFKA_BROKERS
+  # kafka_topic: llm-gateway-request-logs
 
 # Budgets and rate limits, tracked per key and per team in Redis. A value of 0
 # means unlimited. mode soft allows the request and reports the breach on the

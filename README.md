@@ -158,6 +158,30 @@ Clients can steer caching per request with a `Cache-Control` header, honoring an
 
 Read the `x-llm-cache-key` from a response, then `POST /cache/delete` with that key to bust a specific stored entry.
 
+### Upstream failover
+
+An alias can declare an ordered `fallbacks` chain, and a `routing.resilience` block turns on bounded retries and a circuit breaker:
+
+```yaml
+routing:
+  aliases:
+    default:
+      provider: anthropic
+      model: claude-haiku-4-5-20251001
+      fallbacks:
+        - provider: openai
+          model: gpt-4o-mini
+  resilience:
+    max_retries: 2
+    retry_backoff: 200ms
+    request_timeout: 0s      # 0 means no added deadline; never cuts a stream
+    cooldown: 30s
+    cooldown_threshold: 5
+    retryable_status: [429, 500, 502, 503, 504]
+```
+
+When the primary target fails with a retryable status (or a transport error), the gateway retries with exponential backoff and then fails over to the next candidate, all before the first response byte is relayed. Once a streamed response starts, it cannot be retried, so a mid-stream upstream drop surfaces as a truncated response. A status not in `retryable_status` (including client errors and success) is relayed verbatim and never triggers failover. Repeated failures against one target open a Redis-shared circuit breaker that ejects it for `cooldown`, so every replica skips it until it recovers. Retries and fallbacks work without Redis; only the shared cooldown needs `REDIS_ADDR`. A failed-over request is attributed to the target that actually served it and logged with `failover=true`; new metrics `llmgw_upstream_retries_total`, `llmgw_failover_total`, and `llmgw_breaker_open` track the behavior.
+
 ## Deployment
 
 A Helm chart lives in `charts/llm-gateway` (Deployment, Service, Ingress, HPA, ConfigMap, Secret, ServiceAccount). Provider keys and DSNs are injected from a Kubernetes Secret; the gateway config is rendered into a ConfigMap. Run `helm lint charts/llm-gateway` and `helm template charts/llm-gateway` to validate before installing.

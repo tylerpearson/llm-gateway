@@ -9,7 +9,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -62,6 +61,8 @@ type Handler struct {
 	metrics       *metrics.Metrics
 	redactPrompts bool
 	mirror        eval.MirrorHook
+	breaker       Breaker
+	policy        ResiliencePolicy
 }
 
 // Option customizes a Handler.
@@ -123,10 +124,24 @@ func WithMirrorHook(hook eval.MirrorHook) Option {
 	return func(h *Handler) { h.mirror = hook }
 }
 
+// WithFailover enables upstream failover: the handler tries each routed
+// candidate in order, retries per the policy, and consults the breaker to skip
+// targets in cooldown. Without this option the handler makes a single attempt
+// against the primary target (the pre-failover behavior).
+func WithFailover(breaker Breaker, policy ResiliencePolicy) Option {
+	return func(h *Handler) {
+		if breaker != nil {
+			h.breaker = breaker
+		}
+		h.policy = policy
+	}
+}
+
 // New builds a proxy handler over the provider registry and router. Prompt
-// redaction is on by default.
+// redaction is on by default; failover is off (single attempt) until
+// WithFailover is supplied.
 func New(registry provider.Registry, rtr *router.Router, log *slog.Logger, opts ...Option) *Handler {
-	h := &Handler{registry: registry, router: rtr, log: log, redactPrompts: true}
+	h := &Handler{registry: registry, router: rtr, log: log, redactPrompts: true, breaker: NoopBreaker{}}
 	for _, opt := range opts {
 		opt(h)
 	}
@@ -172,17 +187,16 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, clientShape prov
 		keyDefault = p.DefaultAlias
 		ident = ratelimit.Identity{KeyID: p.KeyID, TeamID: p.TeamID}
 	}
-	target, err := h.router.Resolve(meta.Model, r.Header.Get("x-llm-tier"), keyDefault)
+	candidates, err := h.router.Resolve(meta.Model, r.Header.Get("x-llm-tier"), keyDefault)
 	if err != nil {
 		h.log.Warn("routing failed", slog.String("request_id", reqID), slog.Any("error", err))
 		h.writeError(w, http.StatusBadRequest, "invalid_request_error", "no route for the requested model")
 		return
 	}
-	prov, ok := h.registry.Get(target.Provider)
-	if !ok {
-		h.writeError(w, http.StatusBadGateway, "upstream_error", "resolved provider is not available")
-		return
-	}
+	// primary is the alias's canonical target: the cache key, limit accounting,
+	// and mirror seam key off it, while the request may ultimately be served by
+	// a fallback in the candidate list.
+	primary := candidates[0]
 
 	// Budget and rate limit enforcement. This runs before the cache lookup so a
 	// cache hit is still subject to per-request rate limits and hard-mode
@@ -203,7 +217,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, clientShape prov
 						h.metrics.IncLimitRejection(sc)
 					}
 				}
-				h.observe(target.Provider, target.Model, http.StatusTooManyRequests, start, provider.Usage{}, 0, h.liveCacheLabel())
+				h.observe(primary.Provider, primary.Model, http.StatusTooManyRequests, start, provider.Usage{}, 0, h.liveCacheLabel())
 				h.writeError(w, http.StatusTooManyRequests, "rate_limit_error", "budget or rate limit exceeded: "+strings.Join(d.Exceeded, ", "))
 				return
 			}
@@ -221,54 +235,52 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, clientShape prov
 		if tenant == "" {
 			tenant = ident.KeyID
 		}
-		cacheKey = cache.Key(tenant, clientShape, target.Provider, target.Model, body)
+		cacheKey = cache.Key(tenant, clientShape, primary.Provider, primary.Model, body)
 		if !cc.noStore && !cc.noCache {
 			if entry, ok := h.cache.Get(r.Context(), cacheKey); ok && entryFresh(entry, cc) {
-				h.serveCacheHit(w, r, reqID, meta.Model, meta.Stream, target, entry, cacheKey, start)
+				h.serveCacheHit(w, r, reqID, meta.Model, meta.Stream, primary, entry, cacheKey, start)
 				return
 			}
 		}
 	}
 
-	// Post-routing mirror seam for future shadow evaluation (no-op in v1).
+	// Post-routing mirror seam for future shadow evaluation (no-op in v1). It
+	// records the primary target, the route the request was dispatched against
+	// before any failover.
 	if h.mirror != nil {
 		h.mirror.Mirror(r.Context(), eval.MirrorRequest{
 			RequestID:      reqID,
 			KeyID:          ident.KeyID,
 			TeamID:         ident.TeamID,
 			RequestedModel: meta.Model,
-			ServedModel:    target.Model,
-			Provider:       target.Provider,
+			ServedModel:    primary.Model,
+			Provider:       primary.Provider,
 			Body:           body,
 		})
 	}
 
-	sendBody, err := buildBody(body, clientShape, target)
-	if err != nil {
-		h.log.Error("request translation failed", slog.String("request_id", reqID), slog.Any("error", err))
-		h.writeError(w, http.StatusBadRequest, "invalid_request_error", "could not translate request to the upstream format")
-		return
-	}
-
-	resp, err := prov.Complete(r.Context(), &provider.Request{
-		Model:  target.Model,
-		Stream: meta.Stream,
-		Raw:    sendBody,
-		Header: passthroughHeaders(r.Header),
-	})
-	if err != nil {
-		if errors.Is(err, r.Context().Err()) {
+	// Dispatch across the candidate list with retries and breaker gating. served
+	// is the target that actually produced the relayed response. Failover happens
+	// entirely inside dispatch, before any byte is relayed to the client.
+	served, resp, cleanup, lastStatus, dispErr := h.dispatch(r.Context(), reqID, clientShape, meta.Stream, candidates, body, r.Header)
+	if resp == nil {
+		if r.Context().Err() != nil {
 			return
 		}
-		h.log.Error("upstream request failed",
-			slog.String("request_id", reqID), slog.String("provider", prov.Name()), slog.Any("error", err))
-		if h.metrics != nil {
-			h.metrics.IncUpstreamError(prov.Name())
+		status := http.StatusBadGateway
+		if lastStatus != 0 {
+			status = lastStatus
 		}
-		h.observe(target.Provider, target.Model, http.StatusBadGateway, start, provider.Usage{}, 0, h.liveCacheLabel())
-		h.writeError(w, http.StatusBadGateway, "upstream_error", "upstream provider request failed")
+		h.log.Error("all upstream candidates failed",
+			slog.String("request_id", reqID),
+			slog.String("primary_provider", primary.Provider),
+			slog.Int("candidates", len(candidates)),
+			slog.Any("error", dispErr))
+		h.observe(served.Provider, served.Model, status, start, provider.Usage{}, 0, h.liveCacheLabel())
+		h.writeError(w, status, "upstream_error", "upstream provider request failed")
 		return
 	}
+	defer cleanup()
 	defer func() { _ = resp.Body.Close() }()
 
 	// Capture the response for caching unless the request opted out with
@@ -280,7 +292,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, clientShape prov
 	if h.cache != nil {
 		w.Header().Set("x-llm-cache-key", cacheKey)
 	}
-	usage, written, relayErr := h.relayResponse(w, resp, clientShape, target, meta.Stream, capture)
+	usage, written, relayErr := h.relayResponse(w, resp, clientShape, served, meta.Stream, capture)
 
 	// Post-response bookkeeping uses a context derived from the request's but
 	// with cancellation stripped. r.Context() is canceled as soon as the
@@ -305,16 +317,17 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, clientShape prov
 	// Feed the request's tokens and cost into the limiter counters so later
 	// requests see updated usage.
 	if h.limiter != nil && (ident.KeyID != "" || ident.TeamID != "") && resp.StatusCode < 400 {
-		cost, _ := h.pricing.Cost(target.Model, usage.InputTokens, usage.OutputTokens, usage.CacheReadTokens, usage.CacheWriteTokens)
+		cost, _ := h.pricing.Cost(served.Model, usage.InputTokens, usage.OutputTokens, usage.CacheReadTokens, usage.CacheWriteTokens)
 		h.limiter.RecordUsage(bgCtx, ident, usage.InputTokens+usage.OutputTokens, cost)
 	}
 
 	h.log.Info("proxy request",
 		slog.String("request_id", reqID),
-		slog.String("provider", target.Provider),
+		slog.String("provider", served.Provider),
 		slog.String("requested_model", meta.Model),
-		slog.String("served_model", target.Model),
-		slog.Bool("translated", clientShape != target.Shape),
+		slog.String("served_model", served.Model),
+		slog.Bool("translated", clientShape != served.Shape),
+		slog.Bool("failover", served.Provider != primary.Provider || served.Model != primary.Model),
 		slog.Bool("stream", meta.Stream),
 		slog.Bool("cache_hit", false),
 		slog.Int("status", resp.StatusCode),
@@ -324,9 +337,9 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, clientShape prov
 		slog.Duration("duration", time.Since(start)),
 	)
 	if h.recorder != nil {
-		h.recordAttribution(r, reqID, meta.Model, target, resp.StatusCode, usage, start, false)
+		h.recordAttribution(r, reqID, meta.Model, served, resp.StatusCode, usage, start, false)
 	}
-	h.observe(target.Provider, target.Model, resp.StatusCode, start, usage, h.costOf(target.Model, usage), h.liveCacheLabel())
+	h.observe(served.Provider, served.Model, resp.StatusCode, start, usage, h.costOf(served.Model, usage), h.liveCacheLabel())
 	if relayErr != nil {
 		h.log.Warn("response relay interrupted", slog.String("request_id", reqID), slog.Any("error", relayErr))
 	}

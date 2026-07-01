@@ -122,6 +122,31 @@ routing:
     fast:
       provider: anthropic
 `},
+		{"fallback unknown provider", `
+providers:
+  anthropic:
+    type: anthropic
+routing:
+  aliases:
+    default:
+      provider: anthropic
+      model: claude
+      fallbacks:
+        - provider: missing
+          model: x
+`},
+		{"fallback missing model", `
+providers:
+  anthropic:
+    type: anthropic
+routing:
+  aliases:
+    default:
+      provider: anthropic
+      model: claude
+      fallbacks:
+        - provider: anthropic
+`},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -164,6 +189,91 @@ func TestLimitsModeDefaultAndValidation(t *testing.T) {
 	if _, err := Load(writeConfig(t, "limits:\n  mode: nuke\n")); err == nil {
 		t.Error("expected error for invalid limits.mode")
 	}
+}
+
+func TestResilienceDefaultsAndDetection(t *testing.T) {
+	base := `
+providers:
+  anthropic:
+    type: anthropic
+  openai:
+    type: openai
+routing:
+  default_alias: default
+  aliases:
+    default:
+      provider: anthropic
+      model: claude
+`
+
+	t.Run("absent when no failover configured", func(t *testing.T) {
+		cfg, err := Load(writeConfig(t, base))
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.Routing.FailoverConfigured() {
+			t.Error("FailoverConfigured should be false without fallbacks or a resilience block")
+		}
+		if cfg.Routing.Resilience.MaxRetries != 0 {
+			t.Errorf("max_retries = %d, want 0 (defaults not applied)", cfg.Routing.Resilience.MaxRetries)
+		}
+	})
+
+	t.Run("declaring fallbacks fills defaults", func(t *testing.T) {
+		cfg, err := Load(writeConfig(t, base+`      fallbacks:
+        - provider: openai
+          model: gpt-4o-mini
+`))
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if !cfg.Routing.FailoverConfigured() {
+			t.Fatal("FailoverConfigured should be true when fallbacks are declared")
+		}
+		res := cfg.Routing.Resilience
+		if res.MaxRetries != 2 {
+			t.Errorf("max_retries default = %d, want 2", res.MaxRetries)
+		}
+		if res.RetryBackoff != 200*time.Millisecond {
+			t.Errorf("retry_backoff default = %v, want 200ms", res.RetryBackoff)
+		}
+		if res.Cooldown != 30*time.Second {
+			t.Errorf("cooldown default = %v, want 30s", res.Cooldown)
+		}
+		if res.CooldownThreshold != 5 {
+			t.Errorf("cooldown_threshold default = %d, want 5", res.CooldownThreshold)
+		}
+		want := []int{429, 500, 502, 503, 504}
+		if len(res.RetryableStatus) != len(want) {
+			t.Fatalf("retryable_status = %v, want %v", res.RetryableStatus, want)
+		}
+		for i := range want {
+			if res.RetryableStatus[i] != want[i] {
+				t.Errorf("retryable_status[%d] = %d, want %d", i, res.RetryableStatus[i], want[i])
+			}
+		}
+	})
+
+	t.Run("explicit values are preserved", func(t *testing.T) {
+		cfg, err := Load(writeConfig(t, base+`  resilience:
+    max_retries: 1
+    request_timeout: 5s
+    retryable_status: [503]
+`))
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		res := cfg.Routing.Resilience
+		if res.MaxRetries != 1 {
+			t.Errorf("max_retries = %d, want 1", res.MaxRetries)
+		}
+		if res.RequestTimeout != 5*time.Second {
+			t.Errorf("request_timeout = %v, want 5s", res.RequestTimeout)
+		}
+		if len(res.RetryableStatus) != 1 || res.RetryableStatus[0] != 503 {
+			t.Errorf("retryable_status = %v, want [503]", res.RetryableStatus)
+		}
+	})
 }
 
 func TestLoadMissingFile(t *testing.T) {

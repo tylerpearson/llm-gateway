@@ -85,12 +85,44 @@ type Provider struct {
 type Routing struct {
 	DefaultAlias string           `yaml:"default_alias"`
 	Aliases      map[string]Route `yaml:"aliases"`
+	Resilience   Resilience       `yaml:"resilience"`
 }
 
-// Route is a concrete provider and model target for an alias.
+// Route is a concrete provider and model target for an alias. Fallbacks are
+// tried in order when the primary target fails with a retryable error; they are
+// ignored unless resilience is configured.
 type Route struct {
-	Provider string `yaml:"provider"`
-	Model    string `yaml:"model"`
+	Provider  string  `yaml:"provider"`
+	Model     string  `yaml:"model"`
+	Fallbacks []Route `yaml:"fallbacks"`
+}
+
+// Resilience configures upstream failover: bounded retries with backoff, a
+// per-attempt request timeout, and a circuit breaker that ejects a repeatedly
+// failing target for a cooldown. The zero value disables failover, in which case
+// each request makes a single attempt against its primary target. Failover is
+// considered configured when any of these fields is set or when any alias
+// declares fallbacks; sensible defaults are then filled for the rest.
+type Resilience struct {
+	// MaxRetries is the number of extra attempts per candidate on a retryable
+	// failure, on top of the first attempt.
+	MaxRetries int `yaml:"max_retries"`
+	// RetryBackoff is the base delay before a retry; it grows exponentially with
+	// jitter across attempts.
+	RetryBackoff time.Duration `yaml:"retry_backoff"`
+	// RequestTimeout bounds a single attempt's wait for the upstream response.
+	// It never cuts off an in-progress streamed body. Zero means no added
+	// deadline beyond the client's request context.
+	RequestTimeout time.Duration `yaml:"request_timeout"`
+	// Cooldown is how long an ejected target stays out of rotation.
+	Cooldown time.Duration `yaml:"cooldown"`
+	// CooldownThreshold is the number of consecutive failures that ejects a
+	// target.
+	CooldownThreshold int `yaml:"cooldown_threshold"`
+	// RetryableStatus lists upstream HTTP status codes that trigger a retry or
+	// failover. Any status not listed (including client errors and 2xx) is
+	// relayed to the caller as is.
+	RetryableStatus []int `yaml:"retryable_status"`
 }
 
 // Storage holds backend connection settings. DSNs are resolved from the
@@ -171,6 +203,55 @@ func (c *Config) applyDefaults() {
 		t := true
 		c.Security.RedactPrompts = &t
 	}
+	c.applyResilienceDefaults()
+}
+
+// defaultRetryableStatus is the failover trigger set applied when resilience is
+// configured but the field is left empty: rate limiting and the standard 5xx
+// upstream failures.
+var defaultRetryableStatus = []int{429, 500, 502, 503, 504}
+
+// FailoverConfigured reports whether the routing config asks for upstream
+// failover, either through an explicit resilience block or by declaring
+// fallbacks on any alias.
+func (r Routing) FailoverConfigured() bool {
+	res := r.Resilience
+	if res.MaxRetries > 0 || res.RetryBackoff > 0 || res.RequestTimeout > 0 ||
+		res.Cooldown > 0 || res.CooldownThreshold > 0 || len(res.RetryableStatus) > 0 {
+		return true
+	}
+	for _, route := range r.Aliases {
+		if len(route.Fallbacks) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// applyResilienceDefaults fills sensible defaults for the resilience block once
+// failover is configured. RequestTimeout intentionally stays at its configured
+// value (zero by default) so a streamed response is never cut off by a timeout
+// the operator did not ask for.
+func (c *Config) applyResilienceDefaults() {
+	if !c.Routing.FailoverConfigured() {
+		return
+	}
+	res := &c.Routing.Resilience
+	if res.MaxRetries == 0 {
+		res.MaxRetries = 2
+	}
+	if res.RetryBackoff == 0 {
+		res.RetryBackoff = 200 * time.Millisecond
+	}
+	if res.Cooldown == 0 {
+		res.Cooldown = 30 * time.Second
+	}
+	if res.CooldownThreshold == 0 {
+		res.CooldownThreshold = 5
+	}
+	if len(res.RetryableStatus) == 0 {
+		res.RetryableStatus = append([]int(nil), defaultRetryableStatus...)
+	}
 }
 
 // RedactPrompts reports whether prompt and response content must be kept out of
@@ -233,6 +314,20 @@ func (c *Config) validate() error {
 		if _, ok := c.Providers[route.Provider]; !ok {
 			return fmt.Errorf("routing alias %q references unknown provider %q", name, route.Provider)
 		}
+		for i, fb := range route.Fallbacks {
+			if fb.Provider == "" || fb.Model == "" {
+				return fmt.Errorf("routing alias %q fallback %d must set provider and model", name, i)
+			}
+			if _, ok := c.Providers[fb.Provider]; !ok {
+				return fmt.Errorf("routing alias %q fallback %d references unknown provider %q", name, i, fb.Provider)
+			}
+		}
+	}
+	if c.Routing.Resilience.MaxRetries < 0 {
+		return fmt.Errorf("routing.resilience.max_retries must not be negative")
+	}
+	if c.Routing.Resilience.CooldownThreshold < 0 {
+		return fmt.Errorf("routing.resilience.cooldown_threshold must not be negative")
 	}
 	return nil
 }

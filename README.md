@@ -1,9 +1,10 @@
 # llm-gateway
 
 > **Work in progress / personal test project.** This is a learning and portfolio
-> build under active construction, not a finished or supported product. Phases
-> P0 through P3 currently exist (see Status below). Do not deploy it as is. The
-> public repository exists so CI can run on free Actions minutes.
+> build, not a finished or supported product. v1 (phases P0 through P9) is
+> feature-complete (see Status below), but it has not been run in production and
+> is not hardened for it. Do not deploy it as is. The public repository exists so
+> CI can run on free Actions minutes.
 
 A production-grade multi-provider LLM gateway in Go. Every LLM call from Claude Code and other clients flows through a single proxy so cost control, request routing, response caching, and observability happen in one place rather than in each client. The gateway supports Anthropic, OpenAI, and GLM out of the box, attributes spend to teams and virtual keys, and feeds Grafana dashboards backed by Prometheus and ClickHouse.
 
@@ -23,6 +24,14 @@ Two ingress endpoints let existing clients work unmodified:
 - `POST /v1/chat/completions` (OpenAI shape; compatible with OpenAI clients and GLM)
 
 The middleware chain handles: request ID and recovery, virtual key auth (MySQL-backed), rate-limit and budget checks (Redis), alias/tier routing, response cache lookup (Redis), streaming tee for usage capture, cost computation, async ClickHouse logging, Redis counter increments, and Prometheus metric updates.
+
+## Documentation
+
+This README is the feature reference. Task-focused guides live under [`docs/`](docs/):
+
+- [Local development](docs/local-development.md): run the full stack with Docker Compose, seed keys, send a first request, and reach Grafana.
+- [Kubernetes deployment](docs/kubernetes.md): install the Helm chart, wire secrets and external datastores, enable ingress and autoscaling, and roll out upgrades.
+- [Connecting Claude Code](docs/claude-code.md): point Claude Code at the gateway, choose a routing tier, and confirm spend is attributed to the right key and tool.
 
 ## Status
 
@@ -143,7 +152,31 @@ Operational endpoints available today:
 | GET | `/cache/ping` | Cache backend health probe (when the cache is enabled) |
 | POST | `/cache/delete` | Evict one cache entry by key: JSON body `{"key": "..."}` (when the cache is enabled) |
 
-Routing is controlled by virtual model aliases (`default`, `fast`, `frontier`) and the `x-llm-tier` header. Responses carry `x-llm-cache` (hit or miss), `x-llm-cache-key` (the entry key, for inspection or deletion), and `x-llm-limit` (any exceeded budget or rate limit).
+Routing is controlled by virtual model aliases (`default`, `fast`, `frontier`) and the `x-llm-tier` request header.
+
+### Request headers
+
+Clients steer the gateway with a small set of `x-llm-*` request headers. All are optional.
+
+| Header | Effect |
+|--------|--------|
+| `x-llm-tier` | Select a routing tier or alias for this request, overriding the key's default alias. |
+| `x-llm-tags` | Comma-separated spend tags recorded on the request log (see [spend attribution](#spend-attribution-dimensions)). |
+| `x-llm-end-user` | End-customer id recorded on the request log, taking precedence over any `user` field in the body. |
+| `Cache-Control` | Per-request cache directives (see [per-request cache control](#per-request-cache-control)). |
+
+### Response signals
+
+Every proxied response carries `x-llm-*` signals so clients and log scrapers can see what the gateway did. Because token usage is only known after a streamed body finishes, the per-request cost is delivered as an HTTP **trailer** on live responses and as a normal header on cache hits (where the cost is known up front and is zero).
+
+| Signal | Kind | Meaning |
+|--------|------|---------|
+| `x-llm-cache` | Header | `hit` when served from the response cache, `miss` when fetched from the upstream. |
+| `x-llm-cache-key` | Header | The cache entry key, for inspection or targeted eviction via `POST /cache/delete`. |
+| `x-llm-cost-usd` | Header on cache hits, trailer on live responses | The computed USD cost of this response, formatted to six decimals. A cache hit reports `0.000000` because it incurred no upstream spend, which surfaces cache savings directly. Live responses announce it in the `Trailer` header and set the value once usage is captured. |
+| `x-llm-limit` | Header | Comma-separated budgets or rate limits this request exceeded (present only on a breach). |
+
+Reading the cost trailer requires a client that surfaces HTTP trailers (for example Go's `http.Response.Trailer` after the body is fully read, or `curl --raw` over a chunked response). Clients that ignore trailers still receive the full response body unaffected.
 
 ### Per-request cache control
 
@@ -214,6 +247,8 @@ The built-in `regex_mask` guard is a reference implementation that redacts email
 ## Deployment
 
 A Helm chart lives in `charts/llm-gateway` (Deployment, Service, Ingress, HPA, ConfigMap, Secret, ServiceAccount). Provider keys and DSNs are injected from a Kubernetes Secret; the gateway config is rendered into a ConfigMap. Run `helm lint charts/llm-gateway` and `helm template charts/llm-gateway` to validate before installing.
+
+See the [Kubernetes deployment guide](docs/kubernetes.md) for a full walkthrough: managing secrets, pointing at external MySQL, ClickHouse, and Redis, enabling ingress and the HPA, Prometheus scraping, and rolling upgrades.
 
 ## Development
 

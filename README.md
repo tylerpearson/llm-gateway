@@ -69,20 +69,47 @@ export ANTHROPIC_API_KEY=sk-ant-...
 export OPENAI_API_KEY=sk-...
 export GLM_API_KEY=...
 
-# Bring up the full dev stack (gateway, MySQL, ClickHouse, Redis, Prometheus, Grafana).
+# Bring up the full dev stack (gateway, MySQL, ClickHouse, Redis, Prometheus,
+# Grafana). This already runs the gateway at http://localhost:8080, so for a
+# turnkey local run this one command is enough.
 make up
+```
 
-# Or run the gateway binary directly against an already-running stack.
+`make run` instead runs the gateway from source on your host, which is handy for
+a fast edit-rebuild loop. It connects to MySQL, ClickHouse, and Redis only when
+the matching `MYSQL_DSN`, `CLICKHOUSE_DSN`, and `REDIS_ADDR` variables are set in
+your shell; with none set it starts unauthenticated with those features off (a
+zero-dependency quick start). To run it fully wired, start the stack with
+`make up` in another terminal (it publishes the datastore ports on `127.0.0.1`),
+then point the gateway at them:
+
+```bash
+export MYSQL_DSN='gateway:gateway@tcp(127.0.0.1:3306)/llmgateway?parseTime=true'
+export CLICKHOUSE_DSN='clickhouse://127.0.0.1:9000/default'
+export REDIS_ADDR='127.0.0.1:6379'
 make run
 ```
 
-**Seed a team and virtual key** (requires `MYSQL_DSN`):
+If `make run` reports `connection refused`, a `*_DSN` variable is set but the
+stack is not reachable: start it with `make up`, or `unset` the variable to run
+unauthenticated.
+
+**Seed a team and virtual key.** With the dev stack from `make up` running, the
+`make` helpers point `gatewayctl` at the local datastores for you, so there is no
+DSN to set:
 
 ```bash
-gatewayctl migrate                                   # apply MySQL (and ClickHouse) schema
-gatewayctl team create acme                          # prints the team id
-gatewayctl key create --team <team-id> --name dev    # prints the key once, stores only its hash
+make migrate                             # apply MySQL and ClickHouse schema
+make ctl ARGS="team create acme"         # prints the team id
+make ctl ARGS="key create --team <team-id> --name dev"   # prints the key once, stores only its hash
 ```
+
+`gatewayctl` is a project binary, not a globally installed command, which is why
+a bare `gatewayctl ...` gives "command not found". The `make ctl` target runs it
+via `go run` against the dev stack. To invoke it directly instead, build it with
+`make build` and run `./bin/gatewayctl <command>` from the repo root, setting
+`MYSQL_DSN` (and `CLICKHOUSE_DSN` for `migrate`) yourself. Override the DSNs the
+`make` targets use by exporting `MYSQL_DSN` / `CLICKHOUSE_DSN` before running them.
 
 **Pointing Claude Code at the gateway:**
 
@@ -92,6 +119,24 @@ export ANTHROPIC_API_KEY=<virtual-key>   # the llmgw_... key from gatewayctl key
 ```
 
 The gateway holds the real provider key; clients authenticate with their virtual key. When `MYSQL_DSN` is not set the gateway runs unauthenticated and logs a prominent warning (local development only).
+
+### Troubleshooting local dev
+
+- **`docker compose ... unknown shorthand flag: 'f'` or `command not found`**: the
+  Docker CLI has no Compose plugin. Install it with `brew install docker-compose`
+  and ensure an engine is running (Docker Desktop or Colima). The `make` targets
+  auto-detect either the `docker compose` plugin or the standalone `docker-compose`.
+- **`gatewayctl: command not found`**: it is a project binary, not on your `PATH`.
+  Use `make ctl ARGS="..."`, or `./bin/gatewayctl` after `make build`.
+- **`connect: connection refused` on `make run` or `gatewayctl`**: a `*_DSN`
+  variable is set but the datastore is not reachable. Start the stack with
+  `make up` (it publishes MySQL, ClickHouse, and Redis on `127.0.0.1`), or `unset`
+  the variable to run the gateway unauthenticated with those features off.
+- **ClickHouse `Authentication failed ... default` (code 516)**: recent ClickHouse
+  images lock the `default` user to localhost when given no credentials, blocking
+  the gateway over the Docker network. The dev stack sets
+  `CLICKHOUSE_SKIP_USER_SETUP=1` to keep the classic open dev behavior. If you see
+  this after upgrading an old stack, recreate ClickHouse: `make down && make up`.
 
 ## Configuration
 

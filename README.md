@@ -158,6 +158,18 @@ Clients can steer caching per request with a `Cache-Control` header, honoring an
 
 Read the `x-llm-cache-key` from a response, then `POST /cache/delete` with that key to bust a specific stored entry.
 
+### Spend attribution dimensions
+
+Every request log carries the virtual key and team. Requests can add finer dimensions so cost can be sliced by tool, customer, or cost center in ClickHouse and Grafana:
+
+| Dimension | Source |
+|-----------|--------|
+| `user_agent` | The client `User-Agent` header, so spend can be split by tool (for example Claude Code versus a CLI). Always captured. |
+| `end_user` | The end customer, resolved from the `x-llm-end-user` header, then the request body `user` field (OpenAI shape), then `metadata.user_id` (Anthropic shape). First non-empty wins. |
+| `tags` | The comma-separated `x-llm-tags` header, plus any headers named in `attribution.tag_headers` captured as `name:value`. Tags are deduplicated and sorted. |
+
+Configure the tag headers under `attribution.tag_headers` in the config; `User-Agent`, `x-llm-end-user`, and `x-llm-tags` need no configuration.
+
 ### Upstream failover
 
 An alias can declare an ordered `fallbacks` chain, and a `routing.resilience` block turns on bounded retries and a circuit breaker:

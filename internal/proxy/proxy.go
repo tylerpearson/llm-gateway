@@ -13,6 +13,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -34,7 +35,7 @@ import (
 // it; tests provide a fake.
 type ResponseCache interface {
 	Get(ctx context.Context, key string) (*cache.Entry, bool)
-	Set(ctx context.Context, key string, e *cache.Entry)
+	Set(ctx context.Context, key string, e *cache.Entry, ttl time.Duration)
 	MaxBytes() int
 }
 
@@ -210,17 +211,22 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, clientShape prov
 	}
 
 	// Cache lookup on the exact request, scoped to the caller's tenant. A hit
-	// replays the stored response without touching the upstream.
+	// replays the stored response without touching the upstream. Per-request
+	// Cache-Control directives can bypass the read (no-cache, no-store) or bound
+	// how stale a hit may be (s-maxage).
 	var cacheKey string
+	cc := parseCacheControl(r.Header)
 	if h.cache != nil {
 		tenant := ident.TeamID
 		if tenant == "" {
 			tenant = ident.KeyID
 		}
 		cacheKey = cache.Key(tenant, clientShape, target.Provider, target.Model, body)
-		if entry, ok := h.cache.Get(r.Context(), cacheKey); ok {
-			h.serveCacheHit(w, r, reqID, meta.Model, meta.Stream, target, entry, start)
-			return
+		if !cc.noStore && !cc.noCache {
+			if entry, ok := h.cache.Get(r.Context(), cacheKey); ok && entryFresh(entry, cc) {
+				h.serveCacheHit(w, r, reqID, meta.Model, meta.Stream, target, entry, cacheKey, start)
+				return
+			}
 		}
 	}
 
@@ -265,9 +271,14 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, clientShape prov
 	}
 	defer func() { _ = resp.Body.Close() }()
 
+	// Capture the response for caching unless the request opted out with
+	// no-store, in which case there is nothing to buffer.
 	var capture *boundedBuffer
-	if h.cache != nil {
+	if h.cache != nil && !cc.noStore {
 		capture = &boundedBuffer{limit: h.cache.MaxBytes()}
+	}
+	if h.cache != nil {
+		w.Header().Set("x-llm-cache-key", cacheKey)
 	}
 	usage, written, relayErr := h.relayResponse(w, resp, clientShape, target, meta.Stream, capture)
 
@@ -279,13 +290,16 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, clientShape prov
 	bgCtx := context.WithoutCancel(r.Context())
 
 	// Store a successful, fully captured response for future identical requests.
+	// capture is nil when the request opted out with no-store, so that case is
+	// skipped here too. cc.ttl (from a Cache-Control ttl directive) overrides the
+	// default expiry when set.
 	if h.cache != nil && capture != nil && !capture.truncated && resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		h.cache.Set(bgCtx, cacheKey, &cache.Entry{
 			Status:      resp.StatusCode,
 			ContentType: contentType(meta.Stream),
 			Body:        capture.Bytes(),
 			Usage:       usage,
-		})
+		}, cc.ttl)
 	}
 
 	// Feed the request's tokens and cost into the limiter counters so later
@@ -318,10 +332,65 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, clientShape prov
 	}
 }
 
+// cacheControl holds the per-request cache directives parsed from the
+// Cache-Control header. The gateway honors a small, HTTP-aligned subset:
+// no-store (do not read or write the cache), no-cache (skip the read but still
+// store the fresh response), s-maxage=<seconds> (only serve a hit younger than
+// this), and ttl=<seconds> (override the store expiry for this response).
+type cacheControl struct {
+	noStore    bool
+	noCache    bool
+	sMaxAge    time.Duration
+	hasSMaxAge bool
+	ttl        time.Duration
+}
+
+// parseCacheControl reads the Cache-Control request header into directives.
+// Unknown directives are ignored; malformed numeric values are dropped rather
+// than failing the request.
+func parseCacheControl(hdr http.Header) cacheControl {
+	var cc cacheControl
+	raw := hdr.Get("Cache-Control")
+	if raw == "" {
+		return cc
+	}
+	for _, part := range strings.Split(raw, ",") {
+		name, val, _ := strings.Cut(strings.TrimSpace(part), "=")
+		name = strings.ToLower(strings.TrimSpace(name))
+		val = strings.TrimSpace(val)
+		switch name {
+		case "no-store":
+			cc.noStore = true
+		case "no-cache":
+			cc.noCache = true
+		case "s-maxage":
+			if secs, err := strconv.Atoi(val); err == nil && secs >= 0 {
+				cc.sMaxAge = time.Duration(secs) * time.Second
+				cc.hasSMaxAge = true
+			}
+		case "ttl":
+			if secs, err := strconv.Atoi(val); err == nil && secs > 0 {
+				cc.ttl = time.Duration(secs) * time.Second
+			}
+		}
+	}
+	return cc
+}
+
+// entryFresh reports whether a cached entry satisfies the request's s-maxage
+// bound. Without s-maxage every stored entry is fresh enough.
+func entryFresh(e *cache.Entry, cc cacheControl) bool {
+	if !cc.hasSMaxAge {
+		return true
+	}
+	return time.Since(time.Unix(e.CreatedAt, 0)) <= cc.sMaxAge
+}
+
 // serveCacheHit replays a cached response without calling the upstream.
-func (h *Handler) serveCacheHit(w http.ResponseWriter, r *http.Request, reqID, requestedModel string, stream bool, target router.Target, entry *cache.Entry, start time.Time) {
+func (h *Handler) serveCacheHit(w http.ResponseWriter, r *http.Request, reqID, requestedModel string, stream bool, target router.Target, entry *cache.Entry, cacheKey string, start time.Time) {
 	w.Header().Set("Content-Type", entry.ContentType)
 	w.Header().Set("x-llm-cache", "hit")
+	w.Header().Set("x-llm-cache-key", cacheKey)
 	w.WriteHeader(entry.Status)
 	_, _ = w.Write(entry.Body)
 	if f, ok := w.(http.Flusher); ok {

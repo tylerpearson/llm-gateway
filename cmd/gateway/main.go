@@ -125,6 +125,30 @@ func run(configPath string) error {
 		log.Warn("response cache and rate limiting disabled: REDIS_ADDR not configured")
 	}
 
+	// Upstream failover: retries and fallback chain per the resilience config,
+	// plus a Redis-shared circuit breaker when Redis is available. Retries and
+	// fallbacks work without Redis; only the cross-replica cooldown needs it.
+	if cfg.Routing.FailoverConfigured() {
+		res := cfg.Routing.Resilience
+		var breaker proxy.Breaker = proxy.NoopBreaker{}
+		if cfg.Storage.RedisAddr != "" {
+			rb, err := proxy.NewRedisBreaker(cfg.Storage.RedisAddr, res.CooldownThreshold, res.Cooldown, log)
+			if err != nil {
+				return fmt.Errorf("open failover breaker: %w", err)
+			}
+			defer func() { _ = rb.Close() }()
+			breaker = rb
+		} else {
+			log.Warn("failover cooldown disabled: REDIS_ADDR not configured; retries and fallbacks still active")
+		}
+		policy := proxy.NewResiliencePolicy(res.MaxRetries, res.RetryBackoff, res.RequestTimeout, res.RetryableStatus)
+		proxyOpts = append(proxyOpts, proxy.WithFailover(breaker, policy))
+		log.Info("upstream failover enabled",
+			slog.Int("max_retries", res.MaxRetries),
+			slog.Duration("cooldown", res.Cooldown),
+			slog.Int("cooldown_threshold", res.CooldownThreshold))
+	}
+
 	providers := buildProviders(cfg.Providers, log)
 
 	var routeFns []func(chi.Router)

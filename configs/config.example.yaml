@@ -46,12 +46,30 @@ routing:
     default:
       provider: anthropic
       model: claude-haiku-4-5-20251001
+      # Optional ordered failover chain. When the primary target fails with a
+      # retryable status (see resilience below), the gateway tries each fallback
+      # in turn before the first byte is relayed to the client.
+      # fallbacks:
+      #   - provider: openai
+      #     model: gpt-4o-mini
     fast:
       provider: openai
       model: gpt-4o-mini
     frontier:
       provider: anthropic
       model: claude-opus-4-8
+  # Upstream failover. Enabled automatically when any alias declares fallbacks
+  # or when this block is present. Retries and fallbacks work without Redis; the
+  # cross-replica cooldown (circuit breaker) needs REDIS_ADDR. Omit the block to
+  # keep single-attempt behavior. request_timeout defaults to 0 (no added
+  # deadline) so streamed responses are never cut off.
+  # resilience:
+  #   max_retries: 2
+  #   retry_backoff: 200ms
+  #   request_timeout: 0s
+  #   cooldown: 30s
+  #   cooldown_threshold: 5
+  #   retryable_status: [429, 500, 502, 503, 504]
 
 # Backend connection strings, resolved from the environment.
 storage:

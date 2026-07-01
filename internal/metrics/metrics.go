@@ -21,6 +21,9 @@ type Metrics struct {
 	cacheEvents     *prometheus.CounterVec
 	limitRejections *prometheus.CounterVec
 	upstreamErrors  *prometheus.CounterVec
+	upstreamRetries *prometheus.CounterVec
+	failovers       *prometheus.CounterVec
+	breakerOpen     *prometheus.GaugeVec
 }
 
 // New builds and registers the collectors on reg.
@@ -54,8 +57,21 @@ func New(reg prometheus.Registerer) *Metrics {
 			Namespace: "llmgw", Name: "upstream_errors_total",
 			Help: "Upstream request failures by provider.",
 		}, []string{"provider"}),
+		upstreamRetries: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: "llmgw", Name: "upstream_retries_total",
+			Help: "Upstream attempt retries by provider.",
+		}, []string{"provider"}),
+		failovers: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: "llmgw", Name: "failover_total",
+			Help: "Failovers from a primary provider to a fallback provider.",
+		}, []string{"from", "to"}),
+		breakerOpen: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: "llmgw", Name: "breaker_open",
+			Help: "Circuit breaker state per target (1 open, 0 closed).",
+		}, []string{"provider", "model"}),
 	}
-	reg.MustRegister(m.requests, m.duration, m.tokens, m.cost, m.cacheEvents, m.limitRejections, m.upstreamErrors)
+	reg.MustRegister(m.requests, m.duration, m.tokens, m.cost, m.cacheEvents, m.limitRejections,
+		m.upstreamErrors, m.upstreamRetries, m.failovers, m.breakerOpen)
 	return m
 }
 
@@ -90,4 +106,23 @@ func (m *Metrics) IncLimitRejection(scope string) {
 // IncUpstreamError counts an upstream failure for the given provider.
 func (m *Metrics) IncUpstreamError(provider string) {
 	m.upstreamErrors.WithLabelValues(provider).Inc()
+}
+
+// IncUpstreamRetry counts a retried attempt against the given provider.
+func (m *Metrics) IncUpstreamRetry(provider string) {
+	m.upstreamRetries.WithLabelValues(provider).Inc()
+}
+
+// IncFailover counts a failover from one provider to another.
+func (m *Metrics) IncFailover(from, to string) {
+	m.failovers.WithLabelValues(from, to).Inc()
+}
+
+// SetBreakerOpen records whether the breaker for a target is open.
+func (m *Metrics) SetBreakerOpen(provider, model string, open bool) {
+	v := 0.0
+	if open {
+		v = 1.0
+	}
+	m.breakerOpen.WithLabelValues(provider, model).Set(v)
 }

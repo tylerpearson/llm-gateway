@@ -123,6 +123,24 @@ type Resilience struct {
 	// failover. Any status not listed (including client errors and 2xx) is
 	// relayed to the caller as is.
 	RetryableStatus []int `yaml:"retryable_status"`
+	// ContextCheck configures the pre-call context-window check.
+	ContextCheck ContextCheck `yaml:"context_check"`
+}
+
+// ContextCheck configures the optional pre-call context-window check. When
+// enabled, the gateway estimates a request's token size and skips candidate
+// models whose context window cannot fit it, falling through the failover chain
+// or rejecting the request when nothing fits. The estimate is conservative and
+// not an exact token count.
+type ContextCheck struct {
+	// Enabled turns the check on.
+	Enabled bool `yaml:"enabled"`
+	// CharsPerToken is the divisor used to approximate tokens from the request
+	// body's character count. Defaults to 4.
+	CharsPerToken int `yaml:"chars_per_token"`
+	// SafetyMargin inflates the estimate by this fraction to bias toward
+	// over-estimating. Defaults to 0.15.
+	SafetyMargin float64 `yaml:"safety_margin"`
 }
 
 // Storage holds backend connection settings. DSNs are resolved from the
@@ -228,29 +246,37 @@ func (r Routing) FailoverConfigured() bool {
 	return false
 }
 
-// applyResilienceDefaults fills sensible defaults for the resilience block once
-// failover is configured. RequestTimeout intentionally stays at its configured
-// value (zero by default) so a streamed response is never cut off by a timeout
-// the operator did not ask for.
+// applyResilienceDefaults fills sensible defaults for the resilience block.
+// Failover defaults apply once failover is configured; context-check defaults
+// apply once the check is enabled, independently. RequestTimeout intentionally
+// stays at its configured value (zero by default) so a streamed response is
+// never cut off by a timeout the operator did not ask for.
 func (c *Config) applyResilienceDefaults() {
-	if !c.Routing.FailoverConfigured() {
-		return
-	}
 	res := &c.Routing.Resilience
-	if res.MaxRetries == 0 {
-		res.MaxRetries = 2
+	if c.Routing.FailoverConfigured() {
+		if res.MaxRetries == 0 {
+			res.MaxRetries = 2
+		}
+		if res.RetryBackoff == 0 {
+			res.RetryBackoff = 200 * time.Millisecond
+		}
+		if res.Cooldown == 0 {
+			res.Cooldown = 30 * time.Second
+		}
+		if res.CooldownThreshold == 0 {
+			res.CooldownThreshold = 5
+		}
+		if len(res.RetryableStatus) == 0 {
+			res.RetryableStatus = append([]int(nil), defaultRetryableStatus...)
+		}
 	}
-	if res.RetryBackoff == 0 {
-		res.RetryBackoff = 200 * time.Millisecond
-	}
-	if res.Cooldown == 0 {
-		res.Cooldown = 30 * time.Second
-	}
-	if res.CooldownThreshold == 0 {
-		res.CooldownThreshold = 5
-	}
-	if len(res.RetryableStatus) == 0 {
-		res.RetryableStatus = append([]int(nil), defaultRetryableStatus...)
+	if res.ContextCheck.Enabled {
+		if res.ContextCheck.CharsPerToken == 0 {
+			res.ContextCheck.CharsPerToken = 4
+		}
+		if res.ContextCheck.SafetyMargin == 0 {
+			res.ContextCheck.SafetyMargin = 0.15
+		}
 	}
 }
 

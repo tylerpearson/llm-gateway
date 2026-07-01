@@ -17,10 +17,25 @@ type Rates struct {
 	CacheWritePerMTok float64
 }
 
-// Table is a named, versioned set of model rates.
+// Table is a named, versioned set of model rates. ContextWindows holds the
+// maximum context length (input plus output tokens) each model accepts; it is
+// consulted by the pre-call context-window check and is independent of the
+// dollar rates in Rates.
 type Table struct {
-	Version string
-	Rates   map[string]Rates
+	Version        string
+	Rates          map[string]Rates
+	ContextWindows map[string]int
+}
+
+// ContextWindow returns the model's maximum context length in tokens and whether
+// it is known. An unknown or non-positive window returns (0, false) so callers
+// can fail open and skip the check for that model.
+func (t Table) ContextWindow(model string) (int, bool) {
+	w, ok := t.ContextWindows[model]
+	if !ok || w <= 0 {
+		return 0, false
+	}
+	return w, true
 }
 
 // Cost returns the USD cost for the given token counts under model's rates and
@@ -54,6 +69,16 @@ func DefaultTable() Table {
 			// OpenAI. No separate cache billing modeled here.
 			"gpt-4o":      {InputPerMTok: 2.50, OutputPerMTok: 10.00},
 			"gpt-4o-mini": {InputPerMTok: 0.15, OutputPerMTok: 0.60},
+		},
+		// Maximum context length per model, in tokens. Kept alongside rates so
+		// the context-window pre-check has a source of truth; update as models
+		// change. Models absent here are treated as unknown and skip the check.
+		ContextWindows: map[string]int{
+			"claude-haiku-4-5-20251001": 200_000,
+			"claude-sonnet-4-6":         200_000,
+			"claude-opus-4-8":           200_000,
+			"gpt-4o":                    128_000,
+			"gpt-4o-mini":               128_000,
 		},
 	}
 }

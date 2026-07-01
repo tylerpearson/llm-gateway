@@ -254,6 +254,30 @@ routing:
 		}
 	})
 
+	t.Run("context check fills its own defaults when enabled", func(t *testing.T) {
+		cfg, err := Load(writeConfig(t, base+`  resilience:
+    context_check:
+      enabled: true
+`))
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		cc := cfg.Routing.Resilience.ContextCheck
+		if !cc.Enabled {
+			t.Fatal("context_check.enabled should be true")
+		}
+		if cc.CharsPerToken != 4 {
+			t.Errorf("chars_per_token default = %d, want 4", cc.CharsPerToken)
+		}
+		if cc.SafetyMargin != 0.15 {
+			t.Errorf("safety_margin default = %v, want 0.15", cc.SafetyMargin)
+		}
+		// Enabling only the context check does not turn on failover retries.
+		if cfg.Routing.Resilience.MaxRetries != 0 {
+			t.Errorf("max_retries = %d, want 0 (context check is independent of failover)", cfg.Routing.Resilience.MaxRetries)
+		}
+	})
+
 	t.Run("explicit values are preserved", func(t *testing.T) {
 		cfg, err := Load(writeConfig(t, base+`  resilience:
     max_retries: 1

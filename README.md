@@ -182,6 +182,10 @@ routing:
 
 When the primary target fails with a retryable status (or a transport error), the gateway retries with exponential backoff and then fails over to the next candidate, all before the first response byte is relayed. Once a streamed response starts, it cannot be retried, so a mid-stream upstream drop surfaces as a truncated response. A status not in `retryable_status` (including client errors and success) is relayed verbatim and never triggers failover. Repeated failures against one target open a Redis-shared circuit breaker that ejects it for `cooldown`, so every replica skips it until it recovers. Retries and fallbacks work without Redis; only the shared cooldown needs `REDIS_ADDR`. A failed-over request is attributed to the target that actually served it and logged with `failover=true`; new metrics `llmgw_upstream_retries_total`, `llmgw_failover_total`, and `llmgw_breaker_open` track the behavior.
 
+### Context-window pre-check
+
+With `routing.resilience.context_check.enabled: true`, the gateway estimates a request's token size and skips any candidate model whose context window cannot fit it, failing over to a larger-context model in the chain. When no candidate fits, the request is rejected with 413 before any upstream call rather than sent to fail. The estimate is conservative: without a bundled tokenizer it approximates from the request's character count (`chars_per_token`, default 4), inflates by `safety_margin` (default 0.15), and adds the requested `max_tokens`. It is a guard, not an exact token count. Per-model context windows live in the pricing table; unknown models fail open (the check is skipped). Skips are counted by `llmgw_context_skips_total{model}`.
+
 ## Deployment
 
 A Helm chart lives in `charts/llm-gateway` (Deployment, Service, Ingress, HPA, ConfigMap, Secret, ServiceAccount). Provider keys and DSNs are injected from a Kubernetes Secret; the gateway config is rendered into a ConfigMap. Run `helm lint charts/llm-gateway` and `helm template charts/llm-gateway` to validate before installing.

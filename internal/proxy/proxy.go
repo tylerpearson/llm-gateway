@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -63,6 +64,7 @@ type Handler struct {
 	mirror        eval.MirrorHook
 	breaker       Breaker
 	policy        ResiliencePolicy
+	ctxCheck      contextCheck
 }
 
 // Option customizes a Handler.
@@ -134,6 +136,22 @@ func WithFailover(breaker Breaker, policy ResiliencePolicy) Option {
 			h.breaker = breaker
 		}
 		h.policy = policy
+	}
+}
+
+// WithContextCheck enables the pre-call context-window check. table supplies each
+// model's context window; charsPerToken and safetyMargin tune the conservative
+// token estimate. When enabled, a request estimated to exceed a candidate
+// model's window skips that candidate, and a request that fits no candidate is
+// rejected before any upstream call.
+func WithContextCheck(table pricing.Table, charsPerToken int, safetyMargin float64) Option {
+	return func(h *Handler) {
+		h.ctxCheck = contextCheck{
+			enabled:       true,
+			table:         table,
+			charsPerToken: charsPerToken,
+			safetyMargin:  safetyMargin,
+		}
 	}
 }
 
@@ -257,6 +275,26 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, clientShape prov
 			Provider:       primary.Provider,
 			Body:           body,
 		})
+	}
+
+	// Pre-call context-window check: drop candidates whose model cannot fit the
+	// estimated request size so dispatch fails over to a larger-context model.
+	// When nothing fits, reject before any upstream call rather than send a
+	// request guaranteed to fail.
+	if h.ctxCheck.enabled {
+		est := estimateTokens(body, h.ctxCheck.charsPerToken, h.ctxCheck.safetyMargin)
+		fitting, largest := h.filterByContext(candidates, est)
+		if len(fitting) == 0 {
+			h.log.Warn("request exceeds all candidate context windows",
+				slog.String("request_id", reqID),
+				slog.Int("estimated_tokens", est),
+				slog.Int("largest_window", largest))
+			h.observe(primary.Provider, primary.Model, http.StatusRequestEntityTooLarge, start, provider.Usage{}, 0, h.liveCacheLabel())
+			h.writeError(w, http.StatusRequestEntityTooLarge, "invalid_request_error",
+				fmt.Sprintf("estimated %d tokens exceeds the largest available context window (%d)", est, largest))
+			return
+		}
+		candidates = fitting
 	}
 
 	// Dispatch across the candidate list with retries and breaker gating. served

@@ -70,6 +70,13 @@ routing:
   #   cooldown: 30s
   #   cooldown_threshold: 5
   #   retryable_status: [429, 500, 502, 503, 504]
+  #   # Pre-call context-window check: estimate the request size and skip
+  #   # candidate models that cannot fit it, failing over to a larger-context
+  #   # model or rejecting the request. The estimate is conservative, not exact.
+  #   context_check:
+  #     enabled: false
+  #     chars_per_token: 4
+  #     safety_margin: 0.15
 
 # Backend connection strings, resolved from the environment.
 storage:

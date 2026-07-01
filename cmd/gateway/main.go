@@ -104,13 +104,14 @@ func run(configPath string) error {
 	}
 
 	// Exact-match response cache (Redis) when configured.
+	var respCache *cache.Cache
 	if cfg.Storage.RedisAddr != "" {
-		c, err := cache.New(cfg.Storage.RedisAddr, cache.DefaultTTL, cache.DefaultMaxBytes, log)
+		respCache, err = cache.New(cfg.Storage.RedisAddr, cache.DefaultTTL, cache.DefaultMaxBytes, log)
 		if err != nil {
 			return fmt.Errorf("open response cache: %w", err)
 		}
-		defer func() { _ = c.Close() }()
-		proxyOpts = append(proxyOpts, proxy.WithCache(c))
+		defer func() { _ = respCache.Close() }()
+		proxyOpts = append(proxyOpts, proxy.WithCache(respCache))
 		log.Info("response cache enabled", slog.String("sink", "redis"))
 
 		lim, err := ratelimit.New(cfg.Storage.RedisAddr, limitSettings(cfg.Limits), log)
@@ -146,6 +147,22 @@ func run(configPath string) error {
 		log.Info("mounted proxy endpoints", slog.Int("providers", len(providers)))
 	} else {
 		log.Warn("no providers configured; proxy endpoints not mounted")
+	}
+
+	// Operational cache endpoints (health probe and delete-by-key) when the
+	// cache is enabled. Protected by the same auth as the proxy when configured.
+	if respCache != nil {
+		admin := proxy.NewCacheAdmin(respCache, log)
+		routeFns = append(routeFns, func(r chi.Router) {
+			r.Group(func(gr chi.Router) {
+				if authMW != nil {
+					gr.Use(authMW)
+				}
+				gr.Get("/cache/ping", admin.Ping)
+				gr.Post("/cache/delete", admin.Delete)
+			})
+		})
+		log.Info("mounted cache admin endpoints", slog.String("paths", "/cache/ping, /cache/delete"))
 	}
 
 	srv := server.New(cfg.Server, log, reg, routeFns...)

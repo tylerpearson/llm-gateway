@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/tylerpearson/llm-gateway/internal/cache"
 	"github.com/tylerpearson/llm-gateway/internal/provider"
@@ -16,16 +17,18 @@ import (
 )
 
 type fakeCache struct {
-	store map[string]*cache.Entry
-	sets  int
+	store   map[string]*cache.Entry
+	sets    int
+	lastTTL time.Duration
 }
 
 func (f *fakeCache) Get(_ context.Context, key string) (*cache.Entry, bool) {
 	e, ok := f.store[key]
 	return e, ok
 }
-func (f *fakeCache) Set(_ context.Context, key string, e *cache.Entry) {
+func (f *fakeCache) Set(_ context.Context, key string, e *cache.Entry, ttl time.Duration) {
 	f.sets++
+	f.lastTTL = ttl
 	f.store[key] = e
 }
 func (f *fakeCache) MaxBytes() int { return 1 << 20 }

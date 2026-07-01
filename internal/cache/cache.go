@@ -27,12 +27,15 @@ const (
 )
 
 // Entry is a cached response: the exact bytes to replay to the client plus the
-// metadata needed to reconstruct the response and attribute it.
+// metadata needed to reconstruct the response and attribute it. CreatedAt is the
+// Unix time (seconds) the entry was stored, used to honor a request's
+// s-maxage freshness bound.
 type Entry struct {
 	Status      int            `json:"status"`
 	ContentType string         `json:"content_type"`
 	Body        []byte         `json:"body"`
 	Usage       provider.Usage `json:"usage"`
+	CreatedAt   int64          `json:"created_at"`
 }
 
 // Cache is a best-effort Redis cache: lookups and stores never fail a request,
@@ -86,19 +89,36 @@ func (c *Cache) Get(ctx context.Context, key string) (*Entry, bool) {
 	return &e, true
 }
 
-// Set stores an entry under key with the configured TTL. Oversized bodies and
-// errors are ignored (logged), since caching is best effort.
-func (c *Cache) Set(ctx context.Context, key string, e *Entry) {
+// Set stores an entry under key. ttl overrides the configured default when
+// positive (from a request's Cache-Control ttl directive); a zero or negative
+// ttl uses the default. Oversized bodies and errors are ignored (logged), since
+// caching is best effort.
+func (c *Cache) Set(ctx context.Context, key string, e *Entry, ttl time.Duration) {
 	if len(e.Body) > c.maxBytes {
 		return
 	}
+	if ttl <= 0 {
+		ttl = c.ttl
+	}
+	e.CreatedAt = time.Now().Unix()
 	b, err := json.Marshal(e)
 	if err != nil {
 		return
 	}
-	if err := c.rdb.Set(ctx, key, b, c.ttl).Err(); err != nil {
+	if err := c.rdb.Set(ctx, key, b, ttl).Err(); err != nil {
 		c.log.Warn("cache set failed", slog.Any("error", err))
 	}
+}
+
+// Delete evicts a single entry by key. It is used by the cache admin endpoint to
+// bust a specific stored response.
+func (c *Cache) Delete(ctx context.Context, key string) error {
+	return c.rdb.Del(ctx, key).Err()
+}
+
+// Ping reports whether the cache backend is reachable, for the health endpoint.
+func (c *Cache) Ping(ctx context.Context) error {
+	return c.rdb.Ping(ctx).Err()
 }
 
 // Key derives the cache key from the tenant, client shape, resolved provider

@@ -140,8 +140,23 @@ Operational endpoints available today:
 | GET | `/metrics` | Prometheus metrics (Go runtime, process, and `llmgw_*` request collectors) |
 | POST | `/v1/messages` | Anthropic Messages proxy: authenticated, routed, cached, rate-limited, streamed, with usage and cost capture |
 | POST | `/v1/chat/completions` | OpenAI Chat Completions proxy: same pipeline, cross-shape translation when routed to an Anthropic provider |
+| GET | `/cache/ping` | Cache backend health probe (when the cache is enabled) |
+| POST | `/cache/delete` | Evict one cache entry by key: JSON body `{"key": "..."}` (when the cache is enabled) |
 
-Routing is controlled by virtual model aliases (`default`, `fast`, `frontier`) and the `x-llm-tier` header. Responses carry `x-llm-cache` (hit or miss) and `x-llm-limit` (any exceeded budget or rate limit).
+Routing is controlled by virtual model aliases (`default`, `fast`, `frontier`) and the `x-llm-tier` header. Responses carry `x-llm-cache` (hit or miss), `x-llm-cache-key` (the entry key, for inspection or deletion), and `x-llm-limit` (any exceeded budget or rate limit).
+
+### Per-request cache control
+
+Clients can steer caching per request with a `Cache-Control` header, honoring an HTTP-aligned subset:
+
+| Directive | Effect |
+|-----------|--------|
+| `no-store` | Do not read from or write to the cache for this request |
+| `no-cache` | Skip the cached response and fetch fresh, but still store the result |
+| `s-maxage=<seconds>` | Serve a cached hit only if it is younger than this |
+| `ttl=<seconds>` | Override the store expiry for this response |
+
+Read the `x-llm-cache-key` from a response, then `POST /cache/delete` with that key to bust a specific stored entry.
 
 ## Deployment
 

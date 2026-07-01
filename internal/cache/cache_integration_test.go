@@ -38,7 +38,7 @@ func TestCacheRoundTrip(t *testing.T) {
 
 	entry := &Entry{Status: 200, ContentType: "text/event-stream", Body: []byte("hello"),
 		Usage: provider.Usage{InputTokens: 3, OutputTokens: 4}}
-	c.Set(ctx, key, entry)
+	c.Set(ctx, key, entry, 0)
 
 	got, ok := c.Get(ctx, key)
 	if !ok {
@@ -50,7 +50,7 @@ func TestCacheRoundTrip(t *testing.T) {
 
 	// Oversized bodies are not cached (maxBytes is 32 above).
 	bigKey := Key("team-a", provider.ShapeAnthropic, "glm", "big", []byte(nonce))
-	c.Set(ctx, bigKey, &Entry{Status: 200, Body: make([]byte, 1024)})
+	c.Set(ctx, bigKey, &Entry{Status: 200, Body: make([]byte, 1024)}, 0)
 	if _, ok := c.Get(ctx, bigKey); ok {
 		t.Error("oversized entry should not be cached")
 	}

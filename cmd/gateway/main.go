@@ -205,19 +205,22 @@ func run(configPath string) error {
 	}
 
 	// Operational cache endpoints (health probe and delete-by-key) when the
-	// cache is enabled. Protected by the same auth as the proxy when configured.
+	// cache is enabled. These endpoints require auth and are not available in
+	// the unauthenticated development mode.
 	if respCache != nil {
-		admin := proxy.NewCacheAdmin(respCache, log)
-		routeFns = append(routeFns, func(r chi.Router) {
-			r.Group(func(gr chi.Router) {
-				if authMW != nil {
+		if authMW == nil {
+			log.Warn("cache admin endpoints not mounted: auth disabled (MYSQL_DSN not configured)")
+		} else {
+			admin := proxy.NewCacheAdmin(respCache, log)
+			routeFns = append(routeFns, func(r chi.Router) {
+				r.Group(func(gr chi.Router) {
 					gr.Use(authMW)
-				}
-				gr.Get("/cache/ping", admin.Ping)
-				gr.Post("/cache/delete", admin.Delete)
+					gr.Get("/cache/ping", admin.Ping)
+					gr.Post("/cache/delete", admin.Delete)
+				})
 			})
-		})
-		log.Info("mounted cache admin endpoints", slog.String("paths", "/cache/ping, /cache/delete"))
+			log.Info("mounted cache admin endpoints", slog.String("paths", "/cache/ping, /cache/delete"))
+		}
 	}
 
 	srv := server.New(cfg.Server, log, reg, routeFns...)

@@ -149,6 +149,15 @@ func run(configPath string) error {
 			slog.Int("cooldown_threshold", res.CooldownThreshold))
 	}
 
+	// Pre-call context-window check. Uses the pricing table's per-model windows,
+	// independent of whether ClickHouse attribution is enabled.
+	if cc := cfg.Routing.Resilience.ContextCheck; cc.Enabled {
+		proxyOpts = append(proxyOpts, proxy.WithContextCheck(pricing.DefaultTable(), cc.CharsPerToken, cc.SafetyMargin))
+		log.Info("context-window pre-check enabled",
+			slog.Int("chars_per_token", cc.CharsPerToken),
+			slog.Float64("safety_margin", cc.SafetyMargin))
+	}
+
 	providers := buildProviders(cfg.Providers, log)
 
 	var routeFns []func(chi.Router)

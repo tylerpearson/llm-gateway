@@ -51,3 +51,21 @@ func TestDefaultTable(t *testing.T) {
 		t.Errorf("opus input cost = %v, known %v; want positive", cost, known)
 	}
 }
+
+func TestContextWindow(t *testing.T) {
+	tbl := DefaultTable()
+	if w, ok := tbl.ContextWindow("gpt-4o-mini"); !ok || w != 128_000 {
+		t.Errorf("gpt-4o-mini window = %d, known %v; want 128000, true", w, ok)
+	}
+	if w, ok := tbl.ContextWindow("claude-opus-4-8"); !ok || w != 200_000 {
+		t.Errorf("claude-opus-4-8 window = %d, known %v; want 200000, true", w, ok)
+	}
+	if _, ok := tbl.ContextWindow("unlisted-model"); ok {
+		t.Error("unlisted model should report an unknown window")
+	}
+	// A non-positive window is treated as unknown.
+	empty := Table{ContextWindows: map[string]int{"x": 0}}
+	if _, ok := empty.ContextWindow("x"); ok {
+		t.Error("zero window should report unknown")
+	}
+}

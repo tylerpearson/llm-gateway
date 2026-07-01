@@ -24,6 +24,7 @@ type Metrics struct {
 	upstreamRetries *prometheus.CounterVec
 	failovers       *prometheus.CounterVec
 	breakerOpen     *prometheus.GaugeVec
+	contextSkips    *prometheus.CounterVec
 }
 
 // New builds and registers the collectors on reg.
@@ -69,9 +70,13 @@ func New(reg prometheus.Registerer) *Metrics {
 			Namespace: "llmgw", Name: "breaker_open",
 			Help: "Circuit breaker state per target (1 open, 0 closed).",
 		}, []string{"provider", "model"}),
+		contextSkips: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: "llmgw", Name: "context_skips_total",
+			Help: "Candidate models skipped by the pre-call context-window check, by model.",
+		}, []string{"model"}),
 	}
 	reg.MustRegister(m.requests, m.duration, m.tokens, m.cost, m.cacheEvents, m.limitRejections,
-		m.upstreamErrors, m.upstreamRetries, m.failovers, m.breakerOpen)
+		m.upstreamErrors, m.upstreamRetries, m.failovers, m.breakerOpen, m.contextSkips)
 	return m
 }
 
@@ -116,6 +121,11 @@ func (m *Metrics) IncUpstreamRetry(provider string) {
 // IncFailover counts a failover from one provider to another.
 func (m *Metrics) IncFailover(from, to string) {
 	m.failovers.WithLabelValues(from, to).Inc()
+}
+
+// IncContextSkip counts a candidate model skipped by the context-window check.
+func (m *Metrics) IncContextSkip(model string) {
+	m.contextSkips.WithLabelValues(model).Inc()
 }
 
 // SetBreakerOpen records whether the breaker for a target is open.

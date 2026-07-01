@@ -15,6 +15,7 @@ package ratelimit
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -109,44 +110,96 @@ func (l *Limiter) Check(ctx context.Context, id Identity) Decision {
 	month := now.Format("200601")
 
 	var exceeded []string
-	exceeded = append(exceeded, l.checkScope(ctx, "key", id.KeyID, l.s.PerKey, minute, month)...)
-	exceeded = append(exceeded, l.checkScope(ctx, "team", id.TeamID, l.s.PerTeam, minute, month)...)
+
+	// Batch all commands for both scopes in a single pipeline.
+	// Capture command objects to evaluate results after the pipeline executes.
+	var keyReqCmd, teamReqCmd *redis.IntCmd
+	var keyTokCmd, teamTokCmd, keyUSDCmd, teamUSDCmd *redis.StringCmd
+
+	_, err := l.rdb.Pipelined(ctx, func(pipe redis.Pipeliner) error {
+		// Queue key scope commands in order: requests, tokens, USD.
+		if id.KeyID != "" {
+			if l.s.PerKey.RequestsPerMin > 0 {
+				keyReqKey := fmt.Sprintf("rl:req:key:%s:%s", id.KeyID, minute)
+				keyReqCmd = pipe.Incr(ctx, keyReqKey)
+				pipe.Expire(ctx, keyReqKey, minuteWindow)
+			}
+			if l.s.PerKey.TokensPerMin > 0 {
+				keyTokKey := fmt.Sprintf("rl:tok:key:%s:%s", id.KeyID, minute)
+				keyTokCmd = pipe.Get(ctx, keyTokKey)
+			}
+			if l.s.PerKey.MonthlyUSD > 0 {
+				keyUSDKey := fmt.Sprintf("rl:usd:key:%s:%s", id.KeyID, month)
+				keyUSDCmd = pipe.Get(ctx, keyUSDKey)
+			}
+		}
+
+		// Queue team scope commands in order: requests, tokens, USD.
+		if id.TeamID != "" {
+			if l.s.PerTeam.RequestsPerMin > 0 {
+				teamReqKey := fmt.Sprintf("rl:req:team:%s:%s", id.TeamID, minute)
+				teamReqCmd = pipe.Incr(ctx, teamReqKey)
+				pipe.Expire(ctx, teamReqKey, minuteWindow)
+			}
+			if l.s.PerTeam.TokensPerMin > 0 {
+				teamTokKey := fmt.Sprintf("rl:tok:team:%s:%s", id.TeamID, minute)
+				teamTokCmd = pipe.Get(ctx, teamTokKey)
+			}
+			if l.s.PerTeam.MonthlyUSD > 0 {
+				teamUSDKey := fmt.Sprintf("rl:usd:team:%s:%s", id.TeamID, month)
+				teamUSDCmd = pipe.Get(ctx, teamUSDKey)
+			}
+		}
+		return nil
+	})
+
+	// Pipelined returns the first command error, and a GET on a counter key
+	// that has not been written yet fails with redis.Nil. That is the normal
+	// first-request-of-a-window case, not a transport failure, so it is not
+	// worth a warning; the evaluation below treats it as zero usage.
+	if err != nil && !errors.Is(err, redis.Nil) {
+		l.log.Warn("ratelimit check pipeline failed", slog.Any("error", err))
+	}
+
+	// Evaluate results in order: key scope before team scope, requests before tokens before USD.
+	if id.KeyID != "" {
+		if l.s.PerKey.RequestsPerMin > 0 && keyReqCmd != nil {
+			if n, err := keyReqCmd.Result(); err == nil && n > l.s.PerKey.RequestsPerMin {
+				exceeded = append(exceeded, "key:requests_per_min")
+			}
+		}
+		if l.s.PerKey.TokensPerMin > 0 && keyTokCmd != nil {
+			if v, err := keyTokCmd.Int64(); err == nil && v >= l.s.PerKey.TokensPerMin {
+				exceeded = append(exceeded, "key:tokens_per_min")
+			}
+		}
+		if l.s.PerKey.MonthlyUSD > 0 && keyUSDCmd != nil {
+			if v, err := keyUSDCmd.Float64(); err == nil && v >= l.s.PerKey.MonthlyUSD {
+				exceeded = append(exceeded, "key:monthly_usd")
+			}
+		}
+	}
+
+	if id.TeamID != "" {
+		if l.s.PerTeam.RequestsPerMin > 0 && teamReqCmd != nil {
+			if n, err := teamReqCmd.Result(); err == nil && n > l.s.PerTeam.RequestsPerMin {
+				exceeded = append(exceeded, "team:requests_per_min")
+			}
+		}
+		if l.s.PerTeam.TokensPerMin > 0 && teamTokCmd != nil {
+			if v, err := teamTokCmd.Int64(); err == nil && v >= l.s.PerTeam.TokensPerMin {
+				exceeded = append(exceeded, "team:tokens_per_min")
+			}
+		}
+		if l.s.PerTeam.MonthlyUSD > 0 && teamUSDCmd != nil {
+			if v, err := teamUSDCmd.Float64(); err == nil && v >= l.s.PerTeam.MonthlyUSD {
+				exceeded = append(exceeded, "team:monthly_usd")
+			}
+		}
+	}
 
 	allowed := l.s.Mode != ModeHard || len(exceeded) == 0
 	return Decision{Allowed: allowed, Exceeded: exceeded}
-}
-
-func (l *Limiter) checkScope(ctx context.Context, scope, id string, lim Limits, minute, month string) []string {
-	if id == "" {
-		return nil
-	}
-	var exceeded []string
-
-	if lim.RequestsPerMin > 0 {
-		key := fmt.Sprintf("rl:req:%s:%s:%s", scope, id, minute)
-		n, err := l.rdb.Incr(ctx, key).Result()
-		if err == nil {
-			_ = l.rdb.Expire(ctx, key, minuteWindow).Err()
-			if n > lim.RequestsPerMin {
-				exceeded = append(exceeded, scope+":requests_per_min")
-			}
-		} else {
-			l.log.Warn("ratelimit incr failed", slog.Any("error", err))
-		}
-	}
-	if lim.TokensPerMin > 0 {
-		key := fmt.Sprintf("rl:tok:%s:%s:%s", scope, id, minute)
-		if v, err := l.rdb.Get(ctx, key).Int64(); err == nil && v >= lim.TokensPerMin {
-			exceeded = append(exceeded, scope+":tokens_per_min")
-		}
-	}
-	if lim.MonthlyUSD > 0 {
-		key := fmt.Sprintf("rl:usd:%s:%s:%s", scope, id, month)
-		if v, err := l.rdb.Get(ctx, key).Float64(); err == nil && v >= lim.MonthlyUSD {
-			exceeded = append(exceeded, scope+":monthly_usd")
-		}
-	}
-	return exceeded
 }
 
 // RecordUsage adds the request's tokens and cost to the per minute and monthly
@@ -155,24 +208,42 @@ func (l *Limiter) RecordUsage(ctx context.Context, id Identity, tokens int, cost
 	now := l.now()
 	minute := now.Format("200601021504")
 	month := now.Format("200601")
-	l.recordScope(ctx, "key", id.KeyID, l.s.PerKey, tokens, costUSD, minute, month)
-	l.recordScope(ctx, "team", id.TeamID, l.s.PerTeam, tokens, costUSD, minute, month)
-}
 
-func (l *Limiter) recordScope(ctx context.Context, scope, id string, lim Limits, tokens int, costUSD float64, minute, month string) {
-	if id == "" {
-		return
-	}
-	if lim.TokensPerMin > 0 && tokens > 0 {
-		key := fmt.Sprintf("rl:tok:%s:%s:%s", scope, id, minute)
-		if err := l.rdb.IncrBy(ctx, key, int64(tokens)).Err(); err == nil {
-			_ = l.rdb.Expire(ctx, key, minuteWindow).Err()
+	// Batch all commands for both scopes in a single pipeline.
+	_, err := l.rdb.Pipelined(ctx, func(pipe redis.Pipeliner) error {
+		// Queue key scope commands.
+		if id.KeyID != "" {
+			if l.s.PerKey.TokensPerMin > 0 && tokens > 0 {
+				keyTokKey := fmt.Sprintf("rl:tok:key:%s:%s", id.KeyID, minute)
+				pipe.IncrBy(ctx, keyTokKey, int64(tokens))
+				pipe.Expire(ctx, keyTokKey, minuteWindow)
+			}
+			if l.s.PerKey.MonthlyUSD > 0 && costUSD > 0 {
+				keyUSDKey := fmt.Sprintf("rl:usd:key:%s:%s", id.KeyID, month)
+				pipe.IncrByFloat(ctx, keyUSDKey, costUSD)
+				pipe.Expire(ctx, keyUSDKey, monthWindow)
+			}
 		}
-	}
-	if lim.MonthlyUSD > 0 && costUSD > 0 {
-		key := fmt.Sprintf("rl:usd:%s:%s:%s", scope, id, month)
-		if err := l.rdb.IncrByFloat(ctx, key, costUSD).Err(); err == nil {
-			_ = l.rdb.Expire(ctx, key, monthWindow).Err()
+
+		// Queue team scope commands.
+		if id.TeamID != "" {
+			if l.s.PerTeam.TokensPerMin > 0 && tokens > 0 {
+				teamTokKey := fmt.Sprintf("rl:tok:team:%s:%s", id.TeamID, minute)
+				pipe.IncrBy(ctx, teamTokKey, int64(tokens))
+				pipe.Expire(ctx, teamTokKey, minuteWindow)
+			}
+			if l.s.PerTeam.MonthlyUSD > 0 && costUSD > 0 {
+				teamUSDKey := fmt.Sprintf("rl:usd:team:%s:%s", id.TeamID, month)
+				pipe.IncrByFloat(ctx, teamUSDKey, costUSD)
+				pipe.Expire(ctx, teamUSDKey, monthWindow)
+			}
 		}
+		return nil
+	})
+
+	if err != nil {
+		// Degrade open: log and continue on Redis errors.
+		// Missing counters are treated as zero on the next Check call.
+		l.log.Warn("ratelimit record usage pipeline failed", slog.Any("error", err))
 	}
 }

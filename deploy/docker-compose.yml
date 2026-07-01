@@ -39,6 +39,11 @@ services:
   mysql:
     image: mysql:8
     restart: unless-stopped
+    # Published on the host so gatewayctl and other host-run tooling can reach
+    # it at 127.0.0.1:3306. Change the host side if it clashes with a local
+    # MySQL, for example "3307:3306".
+    ports:
+      - "3306:3306"
     environment:
       MYSQL_ROOT_PASSWORD: devroot
       MYSQL_DATABASE: llmgateway
@@ -61,6 +66,17 @@ services:
   clickhouse:
     image: clickhouse/clickhouse-server:latest
     restart: unless-stopped
+    # Native protocol (9000) and HTTP (8123) published for host-run tooling and
+    # ad hoc queries. gatewayctl migrate applies the ClickHouse schema over 9000.
+    ports:
+      - "9000:9000"
+      - "8123:8123"
+    environment:
+      # Without credentials, recent images lock the default user to localhost,
+      # which blocks the gateway container over the Docker network. Skipping the
+      # user setup keeps the classic open dev behavior: default user, no
+      # password, reachable from the stack. Dev only; do not use in production.
+      CLICKHOUSE_SKIP_USER_SETUP: "1"
     ulimits:
       nofile:
         soft: 262144
@@ -82,6 +98,10 @@ services:
   redis:
     image: redis:7
     restart: unless-stopped
+    # Published on the host for local debugging with redis-cli. The gateway in
+    # this stack still reaches it by service name over the compose network.
+    ports:
+      - "6379:6379"
     volumes:
       - redis_data:/data
     networks:

@@ -115,3 +115,15 @@ security:
   # guard:
   #   enabled: false
   #   type: regex_mask
+
+# Spend attribution dimensions. Every request log already carries the virtual
+# key and team. These optional dimensions let cost be sliced further. The
+# client User-Agent (the calling tool, for example Claude Code) and an end-user
+# id are always captured: end user comes from the x-llm-end-user header, then
+# the request body user field (OpenAI shape), then metadata.user_id (Anthropic
+# shape). tag_headers names request headers whose values are recorded as
+# name:value spend tags, alongside any tags passed in the x-llm-tags header.
+attribution:
+  tag_headers: []
+  #   - x-team-project
+  #   - x-cost-center

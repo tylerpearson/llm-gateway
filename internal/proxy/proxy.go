@@ -13,6 +13,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -53,20 +54,21 @@ const maxRequestBytes = 32 << 20 // 32 MiB
 // Handler routes inbound requests to upstream providers, translating across wire
 // shapes when needed.
 type Handler struct {
-	registry provider.Registry
-	router   *router.Router
-	log      *slog.Logger
-	pricing  pricing.Table
-	recorder attribution.Recorder
-	cache         ResponseCache
-	limiter       RateLimiter
-	metrics       *metrics.Metrics
-	redactPrompts bool
-	mirror        eval.MirrorHook
-	breaker       Breaker
-	policy        ResiliencePolicy
-	ctxCheck      contextCheck
-	guard         guard.Guard
+	registry        provider.Registry
+	router          *router.Router
+	log             *slog.Logger
+	pricing         pricing.Table
+	recorder        attribution.Recorder
+	cache           ResponseCache
+	limiter         RateLimiter
+	metrics         *metrics.Metrics
+	redactPrompts   bool
+	mirror          eval.MirrorHook
+	breaker         Breaker
+	policy          ResiliencePolicy
+	ctxCheck        contextCheck
+	guard           guard.Guard
+	spendTagHeaders []string
 }
 
 // Option customizes a Handler.
@@ -155,6 +157,13 @@ func WithContextCheck(table pricing.Table, charsPerToken int, safetyMargin float
 			safetyMargin:  safetyMargin,
 		}
 	}
+}
+
+// WithSpendTags configures request header names whose values are captured as
+// name:value spend tags on each attribution record. The User-Agent and end-user
+// dimensions are always captured and need not be listed here.
+func WithSpendTags(headers []string) Option {
+	return func(h *Handler) { h.spendTagHeaders = headers }
 }
 
 // WithGuard installs a pre-call request guard. The guard inspects each request
@@ -290,6 +299,10 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, clientShape prov
 		}
 	}
 
+	// Capture attribution dimensions once from the (possibly masked) body, so both
+	// the cache-hit and live paths record the same client tool, end user, and tags.
+	dims := h.captureSpendDims(r, body)
+
 	// Cache lookup on the exact request, scoped to the caller's tenant. A hit
 	// replays the stored response without touching the upstream. Per-request
 	// Cache-Control directives can bypass the read (no-cache, no-store) or bound
@@ -304,7 +317,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, clientShape prov
 		cacheKey = cache.Key(tenant, clientShape, primary.Provider, primary.Model, body)
 		if !cc.noStore && !cc.noCache {
 			if entry, ok := h.cache.Get(r.Context(), cacheKey); ok && entryFresh(entry, cc) {
-				h.serveCacheHit(w, r, reqID, meta.Model, meta.Stream, primary, entry, cacheKey, start)
+				h.serveCacheHit(w, r, reqID, meta.Model, meta.Stream, primary, entry, cacheKey, start, dims)
 				return
 			}
 		}
@@ -423,7 +436,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, clientShape prov
 		slog.Duration("duration", time.Since(start)),
 	)
 	if h.recorder != nil {
-		h.recordAttribution(r, reqID, meta.Model, served, resp.StatusCode, usage, start, false)
+		h.recordAttribution(r, reqID, meta.Model, served, resp.StatusCode, usage, start, false, dims)
 	}
 	h.observe(served.Provider, served.Model, resp.StatusCode, start, usage, h.costOf(served.Model, usage), h.liveCacheLabel())
 	if relayErr != nil {
@@ -486,7 +499,7 @@ func entryFresh(e *cache.Entry, cc cacheControl) bool {
 }
 
 // serveCacheHit replays a cached response without calling the upstream.
-func (h *Handler) serveCacheHit(w http.ResponseWriter, r *http.Request, reqID, requestedModel string, stream bool, target router.Target, entry *cache.Entry, cacheKey string, start time.Time) {
+func (h *Handler) serveCacheHit(w http.ResponseWriter, r *http.Request, reqID, requestedModel string, stream bool, target router.Target, entry *cache.Entry, cacheKey string, start time.Time, dims spendDims) {
 	w.Header().Set("Content-Type", entry.ContentType)
 	w.Header().Set("x-llm-cache", "hit")
 	w.Header().Set("x-llm-cache-key", cacheKey)
@@ -509,7 +522,7 @@ func (h *Handler) serveCacheHit(w http.ResponseWriter, r *http.Request, reqID, r
 		slog.Duration("duration", time.Since(start)),
 	)
 	if h.recorder != nil {
-		h.recordAttribution(r, reqID, requestedModel, target, entry.Status, entry.Usage, start, true)
+		h.recordAttribution(r, reqID, requestedModel, target, entry.Status, entry.Usage, start, true, dims)
 	}
 	h.observe(target.Provider, target.Model, entry.Status, start, entry.Usage, 0, "hit")
 }
@@ -686,10 +699,77 @@ func passthroughHeaders(in http.Header) http.Header {
 	return out
 }
 
+// spendDims are the extra attribution dimensions captured from a request: the
+// client tool (User-Agent), the end customer, and any spend tags. They are
+// computed once per request and threaded to both the live and cache-hit
+// attribution paths.
+type spendDims struct {
+	UserAgent string
+	EndUser   string
+	Tags      []string
+}
+
+// captureSpendDims extracts attribution dimensions from the request. UserAgent
+// is the client tool. EndUser is the end customer, resolved from the
+// x-llm-end-user header, then the body's top level user field (OpenAI shape),
+// then metadata.user_id (Anthropic shape); the first non-empty wins. A malformed
+// or oddly typed body simply yields no end user rather than an error.
+func (h *Handler) captureSpendDims(r *http.Request, body []byte) spendDims {
+	d := spendDims{
+		UserAgent: r.Header.Get("User-Agent"),
+		EndUser:   r.Header.Get("x-llm-end-user"),
+		Tags:      h.collectTags(r.Header),
+	}
+	if d.EndUser == "" {
+		var b struct {
+			User     string `json:"user"`
+			Metadata struct {
+				UserID string `json:"user_id"`
+			} `json:"metadata"`
+		}
+		_ = json.Unmarshal(body, &b)
+		if b.User != "" {
+			d.EndUser = b.User
+		} else {
+			d.EndUser = b.Metadata.UserID
+		}
+	}
+	return d
+}
+
+// collectTags builds the sorted, deduplicated spend tag set for a request from
+// the comma-separated x-llm-tags header plus any configured tag headers, which
+// are captured as name:value. Blank tags are dropped; an empty set returns nil.
+func (h *Handler) collectTags(hdr http.Header) []string {
+	set := make(map[string]struct{})
+	add := func(tag string) {
+		if tag = strings.TrimSpace(tag); tag != "" {
+			set[tag] = struct{}{}
+		}
+	}
+	for _, part := range strings.Split(hdr.Get("x-llm-tags"), ",") {
+		add(part)
+	}
+	for _, name := range h.spendTagHeaders {
+		if v := strings.TrimSpace(hdr.Get(name)); v != "" {
+			add(name + ":" + v)
+		}
+	}
+	if len(set) == 0 {
+		return nil
+	}
+	tags := make([]string, 0, len(set))
+	for t := range set {
+		tags = append(tags, t)
+	}
+	sort.Strings(tags)
+	return tags
+}
+
 // recordAttribution computes the request cost and enqueues an attribution
 // record attributed to the authenticated key and team. A cache hit is recorded
 // with zero cost since it incurred no upstream spend.
-func (h *Handler) recordAttribution(r *http.Request, reqID, requestedModel string, target router.Target, status int, usage provider.Usage, start time.Time, cacheHit bool) {
+func (h *Handler) recordAttribution(r *http.Request, reqID, requestedModel string, target router.Target, status int, usage provider.Usage, start time.Time, cacheHit bool, dims spendDims) {
 	var cost float64
 	if !cacheHit {
 		cost, _ = h.pricing.Cost(target.Model, usage.InputTokens, usage.OutputTokens, usage.CacheReadTokens, usage.CacheWriteTokens)
@@ -716,6 +796,9 @@ func (h *Handler) recordAttribution(r *http.Request, reqID, requestedModel strin
 		LatencyMS:        time.Since(start).Milliseconds(),
 		CacheHit:         cacheHit,
 		Status:           status,
+		UserAgent:        dims.UserAgent,
+		EndUser:          dims.EndUser,
+		Tags:             dims.Tags,
 	})
 }
 

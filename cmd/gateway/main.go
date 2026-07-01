@@ -71,6 +71,13 @@ func run(configPath string) error {
 		log.Warn("prompt redaction disabled: request prompts will be logged at debug level")
 	}
 
+	// Spend tag headers let cost be attributed to caller-supplied dimensions
+	// (cost center, project) captured as name:value tags on each request log.
+	if len(cfg.Attribution.TagHeaders) > 0 {
+		proxyOpts = append(proxyOpts, proxy.WithSpendTags(cfg.Attribution.TagHeaders))
+		log.Info("spend tag headers enabled", slog.Int("headers", len(cfg.Attribution.TagHeaders)))
+	}
+
 	// Pre-call request guard. Off by default; when enabled it masks or blocks the
 	// request body before it is sent upstream.
 	if cfg.Security.Guard.Enabled {

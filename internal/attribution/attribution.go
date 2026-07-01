@@ -29,6 +29,18 @@ type Record struct {
 	LatencyMS        int64
 	CacheHit         bool
 	Status           int
+
+	// UserAgent is the client's User-Agent header, the tool that made the call
+	// (for example Claude Code or a CLI). It lets spend be sliced by client tool.
+	UserAgent string
+	// EndUser is the end customer the call was made on behalf of, taken from the
+	// request rather than the virtual key. It is empty when the caller supplies
+	// no end user.
+	EndUser string
+	// Tags are arbitrary spend tags captured from the request, each either a bare
+	// label or a name:value pair from a configured header. They are deduplicated
+	// and sorted so equal inputs produce equal rows.
+	Tags []string
 }
 
 // Recorder accepts records for asynchronous persistence. Record must not block.

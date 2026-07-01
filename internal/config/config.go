@@ -22,6 +22,17 @@ type Config struct {
 	Storage   Storage             `yaml:"storage"`
 	Limits    Limits              `yaml:"limits"`
 	Security  Security            `yaml:"security"`
+
+	Attribution Attribution `yaml:"attribution"`
+}
+
+// Attribution configures optional spend attribution dimensions. TagHeaders lists
+// request header names whose values are captured as name:value spend tags on
+// each request log, so cost can be sliced by cost center, project, or any other
+// caller-supplied header. The User-Agent header is always captured as its own
+// dimension and need not be listed here.
+type Attribution struct {
+	TagHeaders []string `yaml:"tag_headers"`
 }
 
 // Security holds hardening toggles. RedactPrompts (default true) keeps prompt

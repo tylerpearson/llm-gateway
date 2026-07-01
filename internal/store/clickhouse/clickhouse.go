@@ -52,6 +52,14 @@ func (s *Store) InsertRequestLogs(ctx context.Context, recs []attribution.Record
 		return fmt.Errorf("prepare batch: %w", err)
 	}
 	for _, r := range recs {
+		// tags is an Array(String) column; a nil slice must be sent as an empty
+		// slice so the driver writes an empty array rather than rejecting a nil.
+		tags := r.Tags
+		if tags == nil {
+			tags = []string{}
+		}
+		// The trailing user_agent, end_user, and tags columns were appended by a
+		// later migration, so they are bound last to match table column order.
 		if err := batch.Append(
 			r.Timestamp,
 			r.RequestID,
@@ -68,6 +76,9 @@ func (s *Store) InsertRequestLogs(ctx context.Context, recs []attribution.Record
 			uint32(r.LatencyMS),
 			boolToUint8(r.CacheHit),
 			uint16(r.Status),
+			r.UserAgent,
+			r.EndUser,
+			tags,
 		); err != nil {
 			return fmt.Errorf("append row: %w", err)
 		}

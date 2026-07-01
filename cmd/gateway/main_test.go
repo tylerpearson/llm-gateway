@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
 	"github.com/tylerpearson/llm-gateway/internal/auth"
 	"github.com/tylerpearson/llm-gateway/internal/config"
 	"github.com/tylerpearson/llm-gateway/internal/provider"
@@ -188,4 +189,70 @@ func waitForReady(url string, within time.Duration) bool {
 		time.Sleep(20 * time.Millisecond)
 	}
 	return false
+}
+
+// TestRun_CacheAdminNotMountedWithoutAuth verifies that cache admin endpoints
+// are not mounted when auth is disabled (MySQL DSN not configured), even if
+// Redis is available.
+func TestRun_CacheAdminNotMountedWithoutAuth(t *testing.T) {
+	// Start miniredis to provide a Redis instance.
+	mr := miniredis.RunT(t)
+
+	// Set REDIS_ADDR to point to miniredis.
+	t.Setenv("REDIS_ADDR", mr.Addr())
+
+	// Allocate a free port for the server.
+	port := freePort(t)
+
+	// Write a config with Redis but without MySQL (auth disabled).
+	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+	cfg := "server:\n  addr: \"127.0.0.1:" + port + "\"\n  shutdown_timeout: 5s\nlogging:\n  level: error\n  format: json\nstorage:\n  redis_addr_env: REDIS_ADDR\n"
+	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	// Start the server in a goroutine.
+	done := make(chan error, 1)
+	go func() { done <- run(cfgPath) }()
+
+	// Wait for the server to become ready.
+	url := "http://127.0.0.1:" + port + "/readyz"
+	if !waitForReady(url, 3*time.Second) {
+		t.Fatal("server did not become ready in time")
+	}
+
+	// Verify that cache admin endpoints return 404 (not mounted).
+	resp, err := http.Get("http://127.0.0.1:" + port + "/cache/ping") //nolint:noctx // short-lived in test
+	if err != nil {
+		t.Fatalf("GET /cache/ping: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("GET /cache/ping returned status %d, want 404", resp.StatusCode)
+	}
+
+	// Verify that POST /cache/delete also returns 404.
+	resp, err = http.Post("http://127.0.0.1:"+port+"/cache/delete", "application/json", nil) //nolint:noctx // short-lived in test
+	if err != nil {
+		t.Fatalf("POST /cache/delete: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("POST /cache/delete returned status %d, want 404", resp.StatusCode)
+	}
+
+	// Deliver SIGTERM to trigger graceful shutdown.
+	if err := syscall.Kill(syscall.Getpid(), syscall.SIGTERM); err != nil {
+		t.Fatalf("send SIGTERM: %v", err)
+	}
+
+	// Wait for clean shutdown.
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("run returned error on graceful shutdown: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("run did not return after SIGTERM")
+	}
 }

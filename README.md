@@ -194,8 +194,8 @@ Operational endpoints available today:
 | GET | `/metrics` | Prometheus metrics (Go runtime, process, and `llmgw_*` request collectors) |
 | POST | `/v1/messages` | Anthropic Messages proxy: authenticated, routed, cached, rate-limited, streamed, with usage and cost capture |
 | POST | `/v1/chat/completions` | OpenAI Chat Completions proxy: same pipeline, cross-shape translation when routed to an Anthropic provider |
-| GET | `/cache/ping` | Cache backend health probe (when the cache is enabled) |
-| POST | `/cache/delete` | Evict one cache entry by key: JSON body `{"key": "..."}` (when the cache is enabled) |
+| GET | `/cache/ping` | Cache backend health probe (when the cache is enabled and auth is configured) |
+| POST | `/cache/delete` | Evict one cache entry by key: JSON body `{"key": "..."}` (when the cache is enabled and auth is configured) |
 
 Routing is controlled by virtual model aliases (`default`, `fast`, `frontier`) and the `x-llm-tier` request header.
 

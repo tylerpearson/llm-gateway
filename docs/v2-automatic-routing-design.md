@@ -1,7 +1,8 @@
 # Design: automatic per-request model routing
 
-Status: draft for review. No code has been written against this document yet.
-This is a companion to `docs/v2-shadow-eval-design.md` and depends on it.
+Status: reviewed; the recommendation in section 13 is the agreed direction.
+No code has been written against this document yet. This is a companion to
+`docs/v2-shadow-eval-design.md` and depends on it.
 
 This document specifies automatic per-request routing: deciding, on each
 request, whether a cheap default model can handle it or whether it should
@@ -193,6 +194,26 @@ routing:
 Clients opt in by sending `model: auto` (or `x-llm-tier: auto`). Nothing routes
 automatically unless asked, so existing behavior is untouched.
 
+### 6.1 Interaction with the response cache
+
+The response cache is exact-match keyed on the inbound request, whose body
+says `model: auto`. If the cache were consulted before classification, a
+response cached from the cheap tier could be replayed for a request the
+classifier would have escalated to frontier, and vice versa: a correctness
+bug, not a tuning issue. Byte-identical requests do route identically under
+the heuristic strategy, but a model-based classifier is not guaranteed
+deterministic, and a cached entry may predate a routing config change.
+
+The requirement: classification happens during target resolution, before the
+cache lookup, and the cache key is derived from the resolved provider and
+model (the tier the request actually routed to), never from the literal
+`auto`. This falls out of the existing serve order (resolve target, then cache
+lookup) as long as the classifier runs inside resolution; it is stated
+explicitly here so it survives implementation. One consequence: under a
+model-based strategy the classifier also runs for requests that turn out to be
+cache hits. That is the price of a correct key, and one more reason the
+heuristic strategy is the default.
+
 ## 7. How eval output trains the router
 
 The shadow-eval `eval_results` rows are (request, baseline model, candidate
@@ -283,8 +304,10 @@ asymmetric cost of mis-routing.
 - `llmgw_route_decision_total{tier,reason,strategy}`: where auto traffic landed
   and why.
 - `llmgw_route_classifier_latency_seconds`: hot-path tax of the classifier.
-- `llmgw_route_fallback_total{cause}`: how often routing fell back, a health
-  signal for the classifier.
+- `llmgw_route_fallback_total{cause}`: how often routing fell back. This one
+  should alert, not just chart: a broken classifier fails open by design,
+  silently routing all auto traffic to the most expensive tier. That failure
+  is invisible in quality terms and shows up only on the bill.
 - Projected and realized savings: compare auto-routed spend against a
   counterfactual all-frontier and all-cheap baseline, chartable from attribution
   plus the decision metric.
@@ -308,35 +331,48 @@ asymmetric cost of mis-routing.
 - `routing.auto.enabled` defaults false. `model: auto` does nothing until an
   operator turns it on and clients opt in.
 - First shippable strategy is `heuristic`: free, safe, no data dependency.
-- `model` strategy ships only after shadow eval has produced enough data to train
-  and a manual validation pass confirms the router beats the heuristic.
-- `cascade` is an opt-in mode for latency-tolerant, quality-critical routes.
+- `model` strategy is deferred indefinitely (section 13). If revisited, it
+  ships only after shadow eval has produced enough data to train and a manual
+  validation pass confirms the router beats the heuristic.
+- `cascade` is not built (section 13). The strategy enum reserves the name and
+  config validation rejects it with a clear message until it exists.
 
-## 13. Recommendation
+## 13. Recommendation (agreed direction)
 
 1. Build shadow eval first (the companion doc). It is the data engine and the
-   monitor.
+   monitor, and the only piece that produces information we do not already
+   have. Everything else in this doc is an action that cannot be taken
+   responsibly without that data.
 2. Ship heuristic `auto` routing as an independent, free, low-risk win, and to
-   lay down the `Classifier` seam in `internal/router`.
-3. Add the model-based classifier only after eval data exists and shows the
-   heuristic leaving savings on the table, and only if a per-request model call
-   is acceptable on the hot path. Seriously weigh buying (RouteLLM, OpenRouter
-   auto, NotDiamond) against building, unless the learning goal or a data-privacy
-   constraint makes building the point.
-4. Treat cascade as a niche mode, not the default.
+   lay down the `Classifier` seam in `internal/router`. Resolve the cache-key
+   interaction (section 6.1) in the same increment; it is a correctness issue,
+   not polish.
+3. Stop there by default. The model-based classifier is not planned: it puts a
+   model call on the hot path of every request, commits to a retraining loop
+   as models and traffic drift, and the buy side (RouteLLM open source,
+   OpenRouter auto, NotDiamond) is mature. It gets revisited only if eval data
+   shows the heuristic leaving substantial savings on the table, and even then
+   build versus buy is a real decision, with building justified mainly by the
+   learning goal or a data-privacy constraint.
+4. Do not build cascade. It fits batch, latency-tolerant, quality-critical
+   workloads, which is not the traffic profile a general gateway serves.
+   Keeping it in config as an unused mode would be maintenance without users,
+   and the `Classifier` seam does not preclude adding it later if a workload
+   shows up that wants it.
 
 The honest summary: automatic per-request routing is real and is where the
-savings are, but the *good* version depends on eval data and puts a model on the
-hot path, so the free heuristic version is the right first step and the
-calibrated version is an earned second step, not a day-one build.
+savings are, but the *good* version depends on eval data and puts a model on
+the hot path. The plan is eval, then the free heuristic, then stop, and let
+the data make the case if anything more is warranted.
 
-## 14. Open questions
+## 14. Questions, resolved and open
 
-1. Tier granularity: two tiers (cheap, frontier) or more (cheap, mid, frontier)?
-   Start with two; more tiers multiply calibration and testing cost.
-2. Does `auto` interact with the per-key default alias, or override it? Proposed:
-   a key may set `auto` as its default, so unmodified clients get routing.
-3. Heuristic feature set v1: which signals, and what thresholds? Needs a short
-   calibration against real traffic samples before fixing defaults.
-4. Build versus buy for the model strategy: revisit once eval data quantifies the
-   heuristic's gap.
+1. Resolved: two tiers (cheap, frontier). Every extra tier multiplies
+   calibration and testing cost for murky benefit.
+2. Resolved: a key may set `auto` as its default alias, so unmodified clients
+   get routing. That is the only way the feature reaches clients we do not
+   control.
+3. Open: heuristic feature set v1. Which signals, and what thresholds? Needs a
+   short calibration against real traffic samples before fixing defaults.
+4. Open: build versus buy for the model strategy. Revisit only if eval data
+   quantifies a substantial heuristic gap (section 13).

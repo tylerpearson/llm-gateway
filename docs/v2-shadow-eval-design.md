@@ -1,6 +1,7 @@
 # Design: v2 shadow evaluation and eval-gated model swaps
 
-Status: draft for review. No code has been written against this document yet.
+Status: reviewed; the decisions in section 17 are confirmed. No code has been
+written against this document yet.
 
 This document specifies the first v2 increment for llm-gateway: real shadow
 evaluation of a candidate model against the served baseline, scored by an LLM
@@ -220,7 +221,11 @@ finishes.
 6. Compute offline signals (section 7).
 7. Score with the judge (section 8).
 8. Ensure an `eval_runs` row exists for this pairing (lazily, on first use),
-   then insert one `eval_results` row.
+   then insert one `eval_results` row. Run creation must be idempotent across
+   workers: two workers handling the first comparisons for a pairing at the
+   same time must not create duplicate runs. Guard it in the Evaluator with a
+   per-pairing once (a mutex-protected map), not with a database constraint,
+   since ClickHouse does not enforce uniqueness.
 
 Every step after the candidate call is best effort: on any error the worker logs
 and drops the evaluation. Nothing here can surface to the client.
@@ -238,7 +243,14 @@ single-document baselines.
 Independent of the judge, every comparison records:
 
 - baseline cost and candidate cost (USD), already first-class columns.
-- baseline latency and candidate latency (ms).
+- baseline latency and candidate latency (ms). Both measure the same thing,
+  the full upstream round trip: time from sending the request to reading the
+  last byte of the response body. For a streamed baseline that is total stream
+  duration, not time to first token. This keeps the two columns comparable,
+  with one residual skew to keep in mind: the baseline may pay streaming
+  overhead while the candidate is always non-streaming (section 6.4), so small
+  latency deltas are noise. The definition is documented on the dashboard
+  panel so nobody reads the delta as time to first token.
 - a validity flag for the candidate: non-empty text, valid JSON envelope,
   upstream status 2xx.
 
@@ -270,10 +282,16 @@ suite (section 12) drop in later.
 ### 8.2 The LLM judge
 
 `LLMJudge` wraps a configured provider and model. It renders a single grading
-prompt containing the task and both answers, asks for one number in [0,1],
-calls the judge provider non-streaming, extracts the text, and parses the first
-number, clamped to [0,1]. The judge prompt is built in the judge provider's wire
-shape.
+prompt containing the task and both answers, calls the judge provider
+non-streaming, and extracts the text. The prompt demands a strict output
+format: the final line of the reply must be exactly one number in [0,1], and
+the prompt shows the expected shape. Parsing is strict to match: take the
+final line, require it to parse as a single float already in [0,1], and treat
+anything else (a "8/10" scale, prose containing several numbers, an empty
+reply) as a judge error, which drops the evaluation per section 11. The
+asymmetry justifies the strictness: a wrong score silently poisons the
+dataset, while a dropped evaluation costs one sample. The judge prompt is
+built in the judge provider's wire shape.
 
 ### 8.3 Judge bias and the mitigations we take now
 
@@ -332,10 +350,11 @@ ALTER TABLE eval_results
 ```
 
 Additive and back compatible: existing rows default the new columns, and the
-insert path sets them. Decision to confirm: take the migration, or ship the
-first increment on the existing three-cost-and-score schema and add signals
-later. Recommendation: take the migration now so the first data we collect is
-already rich enough to judge the signal.
+insert path sets them. Decision (confirmed in review): take the migration now,
+so the first data collected is already rich enough to judge the signal. In
+particular, without `candidate_valid` the early data cannot distinguish
+"candidate lost on quality" from "candidate returned garbage", and that is
+precisely the first question the data has to answer.
 
 Privacy: `eval_results` stores models, costs, latency, and a score. It never
 stores prompt or response text, consistent with the redaction posture. See
@@ -469,12 +488,13 @@ gate logic is implemented in this increment.
 - Requires ClickHouse configured (for the sink). If eval is enabled without
   ClickHouse, fail fast at startup with a clear message.
 
-## 17. Open decisions to confirm before building
+## 17. Decisions (confirmed in review)
 
-1. Take the additive `0004` migration for latency and validity columns, or ship
-   on the existing schema. Recommendation: take it.
-2. Default sample rate. Recommendation: 0.05.
-3. Position-bias control (randomize A/B and average) now or later.
-   Recommendation: later; record raw single-pass scores first and look at them.
-4. Judge selection guidance: forbid using a candidate's own family as its judge.
-   Recommendation: document now, consider enforcing later.
+1. Take the additive `0004` migration for latency and validity columns. See
+   section 9 for the rationale.
+2. Default sample rate: 0.05.
+3. Position-bias control (randomize A/B and average): later. Record raw
+   single-pass scores first and look at them before paying double judge cost.
+4. Judge selection: do not use a candidate's own model family as its judge.
+   Documented now as a config guideline; consider enforcing at config
+   validation later.

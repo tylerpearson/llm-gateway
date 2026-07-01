@@ -22,37 +22,21 @@ func toUsage(u *openaiUsage) provider.Usage {
 }
 
 // sseUsageScanner reads an OpenAI SSE stream and captures the usage chunk.
+// The line reassembly and SSE framing (chunk buffering, data: prefix, [DONE]
+// skip) live in the shared provider.SSEPayloadScanner; this type only
+// interprets payloads.
 type sseUsageScanner struct {
-	pending []byte
-	usage   provider.Usage
+	*provider.SSEPayloadScanner
+	usage provider.Usage
 }
 
-func newSSEUsageScanner() *sseUsageScanner { return &sseUsageScanner{} }
-
-func (s *sseUsageScanner) Write(p []byte) (int, error) {
-	s.pending = append(s.pending, p...)
-	for {
-		i := bytes.IndexByte(s.pending, '\n')
-		if i < 0 {
-			break
-		}
-		line := s.pending[:i]
-		s.pending = s.pending[i+1:]
-		s.processLine(line)
-	}
-	return len(p), nil
+func newSSEUsageScanner() *sseUsageScanner {
+	s := &sseUsageScanner{}
+	s.SSEPayloadScanner = provider.NewSSEPayloadScanner(s.processPayload)
+	return s
 }
 
-func (s *sseUsageScanner) processLine(line []byte) {
-	line = bytes.TrimRight(line, "\r")
-	const prefix = "data:"
-	if !bytes.HasPrefix(line, []byte(prefix)) {
-		return
-	}
-	payload := bytes.TrimSpace(line[len(prefix):])
-	if len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) {
-		return
-	}
+func (s *sseUsageScanner) processPayload(payload []byte) {
 	var chunk struct {
 		Usage *openaiUsage `json:"usage"`
 	}

@@ -39,11 +39,11 @@ services:
   mysql:
     image: mysql:8
     restart: unless-stopped
-    # Published on the host so gatewayctl and other host-run tooling can reach
-    # it at 127.0.0.1:3306. Change the host side if it clashes with a local
-    # MySQL, for example "3307:3306".
+    # Published on the loopback interface only so gatewayctl and other host-run
+    # tooling can reach it at 127.0.0.1:3306 without exposing MySQL to the LAN.
+    # Change the host side if it clashes with a local MySQL, e.g. 127.0.0.1:3307.
     ports:
-      - "3306:3306"
+      - "127.0.0.1:3306:3306"
     environment:
       MYSQL_ROOT_PASSWORD: devroot
       MYSQL_DATABASE: llmgateway
@@ -66,11 +66,12 @@ services:
   clickhouse:
     image: clickhouse/clickhouse-server:latest
     restart: unless-stopped
-    # Native protocol (9000) and HTTP (8123) published for host-run tooling and
-    # ad hoc queries. gatewayctl migrate applies the ClickHouse schema over 9000.
+    # Native protocol (9000) and HTTP (8123) published on loopback only for
+    # host-run tooling and ad hoc queries, so the passwordless dev ClickHouse is
+    # not reachable from the LAN. gatewayctl migrate applies the schema over 9000.
     ports:
-      - "9000:9000"
-      - "8123:8123"
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:8123:8123"
     environment:
       # Without credentials, recent images lock the default user to localhost,
       # which blocks the gateway container over the Docker network. Skipping the
@@ -98,10 +99,11 @@ services:
   redis:
     image: redis:7
     restart: unless-stopped
-    # Published on the host for local debugging with redis-cli. The gateway in
-    # this stack still reaches it by service name over the compose network.
+    # Published on loopback only for local debugging with redis-cli, so the
+    # passwordless dev Redis is not reachable from the LAN. The gateway in this
+    # stack still reaches it by service name over the compose network.
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     volumes:
       - redis_data:/data
     networks:

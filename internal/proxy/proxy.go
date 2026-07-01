@@ -425,7 +425,11 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, clientShape prov
 	if h.recorder != nil {
 		h.recordAttribution(r, reqID, meta.Model, served, resp.StatusCode, usage, start, false)
 	}
-	h.observe(served.Provider, served.Model, resp.StatusCode, start, usage, h.costOf(served.Model, usage), h.liveCacheLabel())
+	cost := h.costOf(served.Model, usage)
+	// Usage is now known, so fill in the x-llm-cost-usd trailer declared by
+	// relayResponse. Unknown models cost zero, matching the attribution record.
+	w.Header().Set("x-llm-cost-usd", strconv.FormatFloat(cost, 'f', 6, 64))
+	h.observe(served.Provider, served.Model, resp.StatusCode, start, usage, cost, h.liveCacheLabel())
 	if relayErr != nil {
 		h.log.Warn("response relay interrupted", slog.String("request_id", reqID), slog.Any("error", relayErr))
 	}
@@ -490,6 +494,11 @@ func (h *Handler) serveCacheHit(w http.ResponseWriter, r *http.Request, reqID, r
 	w.Header().Set("Content-Type", entry.ContentType)
 	w.Header().Set("x-llm-cache", "hit")
 	w.Header().Set("x-llm-cache-key", cacheKey)
+	// A cache hit incurs no upstream spend, so its attributed cost is zero, the
+	// same value recordAttribution stores. Report it explicitly; it doubles as a
+	// signal of cache savings. Unlike the live path the cost is known before the
+	// body here, so it is a normal header rather than a trailer.
+	w.Header().Set("x-llm-cost-usd", "0.000000")
 	w.WriteHeader(entry.Status)
 	_, _ = w.Write(entry.Body)
 	if f, ok := w.(http.Flusher); ok {
@@ -523,6 +532,11 @@ func (h *Handler) relayResponse(w http.ResponseWriter, resp *provider.Response, 
 	if h.cache != nil {
 		w.Header().Set("x-llm-cache", "miss")
 	}
+	// The per-request cost depends on token usage, which is only known after the
+	// body has streamed. Announce x-llm-cost-usd as a trailer so serve can set its
+	// value once usage is captured. Add, not Set, so any earlier Trailer
+	// declaration is preserved.
+	w.Header().Add("Trailer", "x-llm-cost-usd")
 	w.WriteHeader(resp.StatusCode)
 
 	sameShape := clientShape == target.Shape

@@ -403,8 +403,12 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, clientShape prov
 	// Store a successful, fully captured response for future identical requests.
 	// capture is nil when the request opted out with no-store, so that case is
 	// skipped here too. cc.ttl (from a Cache-Control ttl directive) overrides the
-	// default expiry when set.
-	if h.cache != nil && capture != nil && !capture.truncated && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+	// default expiry when set. An interrupted relay (client disconnect or
+	// upstream read failure) must not be cached: relay stops copying as soon as
+	// the write to the client fails, so the capture buffer holds only a prefix
+	// of the upstream response, and storing it would replay a partial response
+	// to every identical request until the cache entry expires.
+	if h.cache != nil && capture != nil && relayErr == nil && !capture.truncated && resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		h.cache.Set(bgCtx, cacheKey, &cache.Entry{
 			Status:      resp.StatusCode,
 			ContentType: contentType(meta.Stream),

@@ -20,9 +20,18 @@ risk). Further findings that were surfaced but not planned are listed under
 | 003  | Add a full-stack end-to-end integration test | P1 | M | none | DONE (PR #37, merged 391d80b; verified live against the compose stack) |
 | 004  | Pipeline the rate limiter's Redis round trips | P2 | S | none | DONE (PR #38, merged 1dddb7e; review added the redis.Nil exclusion) |
 | 005  | Extract the duplicated SSE usage scanner | P2 | S | none | DONE (PR #36, merged a23f7ea) |
+| 006  | Surface audit log write failures in gatewayctl | P2 | S | none | DONE (PR #42, merged 5737a1d) |
+| 007  | Add a TTL retention policy to ClickHouse request_logs | P2 | S | none | DONE (PR #43, merged ba4f569; TTL verified live) |
+| 008  | Bind dev-stack Prometheus and Grafana to loopback | P3 | S | none | DONE (PR #41, merged 0e382f9) |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (with one-line reason) |
 REJECTED (with one-line rationale).
+
+Reconcile 2026-07-01 (second audit, at 27f9036): plans 001-005 verified
+merged and green on main. The second audit swept the previously light areas
+(Helm chart, deploy configs, migrations, gatewayctl, metrics, docs) and did a
+fresh pass on the merged delta; it produced plans 006-008 and the additional
+rejections below.
 
 ## Dependency notes
 
@@ -85,3 +94,21 @@ REJECTED (with one-line rationale).
   features is not a gap; see the deferred hardening item instead.
 - Pre-commit hook template: CI enforces the gates; opt-in hooks add little.
 - govulncheck and dependency posture: clean, nothing to do.
+- Grafana datasource `${CLICKHOUSE_PASSWORD}` unset in the dev compose:
+  expands to empty, which matches the passwordless dev ClickHouse
+  (CLICKHOUSE_SKIP_USER_SETUP); dashboards work. The variable is the hook for
+  real deployments. Not a defect.
+- Cross-test SIGTERM interference in cmd/gateway tests: rejected premise; Go
+  tests in one package run sequentially without t.Parallel, and each test
+  consumes its own signal before finishing. The one observed full-suite flake
+  (2026-07-01, never reproduced) is more plausibly the 3s waitForReady
+  deadline under heavy machine load; bump the deadline only if it recurs.
+- SSE scanner drops an unterminated final data line (no trailing newline):
+  real but pre-existing behavior, unreachable with spec-compliant providers,
+  and partial usage is still captured earlier in the stream. Revisit only
+  with evidence of a provider doing this.
+- `_ = fs.Parse(args)` in gatewayctl: flag.ExitOnError terminates on parse
+  failure; the discard is the errcheck idiom for that. Not a bug.
+- Grafana admin/admin in the dev compose: Grafana's own dev default;
+  exposure is addressed by plan 008 (loopback binding), not by inventing a
+  dev password.

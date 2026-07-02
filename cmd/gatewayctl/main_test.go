@@ -1,6 +1,9 @@
 package main
 
 import (
+	"bytes"
+	"context"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -107,4 +110,46 @@ func TestDSNGuardBeforeStore(t *testing.T) {
 			}
 		})
 	}
+}
+
+// fakeAuditRecorder is a stand-in store used to test the warning path in
+// recordAudit without a real database connection.
+type fakeAuditRecorder struct {
+	err error
+}
+
+func (f *fakeAuditRecorder) RecordAudit(_ context.Context, _, _, _, _ string) error {
+	return f.err
+}
+
+// TestRecordAudit_WarnsOnFailure confirms recordAudit writes a single warning
+// line naming the action and the underlying error when the audit write
+// fails, and stays silent when it succeeds.
+func TestRecordAudit_WarnsOnFailure(t *testing.T) {
+	t.Run("failing recorder warns", func(t *testing.T) {
+		var buf bytes.Buffer
+		recorder := &fakeAuditRecorder{err: errors.New("connection refused")}
+		recordAudit(context.Background(), recorder, &buf, "team.create", "t1", "name=acme")
+
+		out := buf.String()
+		if !strings.Contains(out, "team.create") {
+			t.Errorf("warning = %q, want it to mention the action %q", out, "team.create")
+		}
+		if !strings.Contains(out, "connection refused") {
+			t.Errorf("warning = %q, want it to mention the underlying error", out)
+		}
+		if strings.Count(out, "\n") != 1 {
+			t.Errorf("warning = %q, want exactly one line", out)
+		}
+	})
+
+	t.Run("succeeding recorder is silent", func(t *testing.T) {
+		var buf bytes.Buffer
+		recorder := &fakeAuditRecorder{err: nil}
+		recordAudit(context.Background(), recorder, &buf, "team.create", "t1", "name=acme")
+
+		if buf.Len() != 0 {
+			t.Errorf("output = %q, want no output on success", buf.String())
+		}
+	})
 }

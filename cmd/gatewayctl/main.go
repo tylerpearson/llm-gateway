@@ -7,6 +7,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/user"
 	"time"
@@ -22,6 +23,21 @@ func actor() string {
 		return u.Username
 	}
 	return "gatewayctl"
+}
+
+// auditRecorder is the subset of the store needed to write audit entries,
+// declared locally so the warning path is unit-testable with a fake.
+type auditRecorder interface {
+	RecordAudit(ctx context.Context, actor, action, target, details string) error
+}
+
+// recordAudit writes an audit entry and warns on w when the write fails.
+// The admin action itself has already succeeded at this point, so the
+// failure is surfaced but does not change the exit status.
+func recordAudit(c context.Context, s auditRecorder, w io.Writer, action, target, details string) {
+	if err := s.RecordAudit(c, actor(), action, target, details); err != nil {
+		_, _ = fmt.Fprintf(w, "warning: %s succeeded but audit log write failed: %v\n", action, err)
+	}
 }
 
 func main() {
@@ -147,7 +163,7 @@ func cmdTeam(args []string) error {
 		if err != nil {
 			return err
 		}
-		_ = s.RecordAudit(c, actor(), "team.create", t.ID, "name="+t.Name)
+		recordAudit(c, s, os.Stderr, "team.create", t.ID, "name="+t.Name)
 		fmt.Printf("created team\n  id:   %s\n  name: %s\n", t.ID, t.Name)
 		return nil
 	case "list":
@@ -205,7 +221,7 @@ func cmdKey(args []string) error {
 		if err != nil {
 			return err
 		}
-		_ = s.RecordAudit(c, actor(), "key.create", vk.ID, "team="+vk.TeamID+" name="+vk.Name)
+		recordAudit(c, s, os.Stderr, "key.create", vk.ID, "team="+vk.TeamID+" name="+vk.Name)
 		fmt.Printf("created virtual key\n  id:    %s\n  team:  %s\n  name:  %s\n", vk.ID, vk.TeamID, vk.Name)
 		if vk.DefaultAlias != "" {
 			fmt.Printf("  alias: %s\n", vk.DefaultAlias)
@@ -261,7 +277,7 @@ func cmdKey(args []string) error {
 		if err := s.DisableKey(c, *id); err != nil {
 			return err
 		}
-		_ = s.RecordAudit(c, actor(), "key.disable", *id, "")
+		recordAudit(c, s, os.Stderr, "key.disable", *id, "")
 		fmt.Printf("disabled key %s\n", *id)
 		return nil
 	default:

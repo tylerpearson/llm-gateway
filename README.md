@@ -45,7 +45,7 @@ This README is the feature reference. Task-focused guides live under [`docs/`](d
 - Makefile, GitHub Actions CI (build, race tests, lint, vuln, plus a MySQL, ClickHouse, and Redis integration job)
 - **P1**: streaming `POST /v1/messages` pass-through to Anthropic with token usage capture
 - **P2**: virtual key auth backed by MySQL (sha256-hashed keys), `gatewayctl` for migrations and seeding teams and keys
-- **P3**: per-request cost attribution written asynchronously to ClickHouse `request_logs`
+- **P3**: per-request cost attribution written asynchronously to ClickHouse `request_logs`. Request rows are retained for 90 days by ClickHouse TTL (migration 0005); adjust the interval by adding a later migration.
 - **P4**: alias/tier routing, OpenAI and GLM adapters, `POST /v1/chat/completions`, and the bounded cross-shape translation module
 - **P5**: Redis exact-match response cache with streaming replay
 - **P6**: per-key and per-team budgets and rate limits (requests/min, tokens/min, monthly USD) with soft and hard modes

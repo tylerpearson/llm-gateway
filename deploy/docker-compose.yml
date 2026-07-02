@@ -166,8 +166,10 @@ services:
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus_data:/prometheus
+    # Published on the loopback interface only so the unauthenticated dev
+    # Prometheus UI is not reachable from the LAN.
     ports:
-      - "9090:9090"
+      - "127.0.0.1:9090:9090"
     depends_on:
       gateway:
         condition: service_healthy
@@ -189,8 +191,10 @@ services:
       - grafana_data:/var/lib/grafana
       - ./grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
       - ./grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+    # Published on the loopback interface only so the default-credential dev
+    # Grafana UI is not reachable from the LAN.
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     depends_on:
       - prometheus
     networks:
